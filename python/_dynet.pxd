@@ -2,6 +2,7 @@ from libcpp.memory cimport shared_ptr
 from libcpp.vector cimport vector
 from libcpp.string cimport string
 from libcpp cimport bool
+from libcpp.pair cimport pair
 
 ctypedef float real
 
@@ -11,7 +12,7 @@ cdef extern from "dynet/init.h" namespace "dynet":
         string mem_descriptor
         float weight_decay
         int autobatch
-        int autobatch_debug
+        int profiling
         bool shared_parameters
         bool ngpus_requested
         bool ids_requested
@@ -21,6 +22,7 @@ cdef extern from "dynet/init.h" namespace "dynet":
     cdef CDynetParams extract_dynet_params(int& argc, char**& argv, bool shared_parameters)
     cdef void initialize(CDynetParams params)
     cdef void initialize(int& argc, char **& argv, bool shared_parameters)
+    void c_reset_rng "dynet::reset_rng" (unsigned seed) except +
 
 cdef extern from "dynet/dim.h" namespace "dynet":
     cdef cppclass CDim "dynet::Dim":
@@ -48,7 +50,7 @@ cdef extern from "dynet/tensor.h" namespace "dynet":
     float c_as_scalar "dynet::as_scalar" (CTensor& t)
     vector[float] c_as_vector "dynet::as_vector" (CTensor& t)
 
-cdef extern from "dynet/tensor.h" namespace "dynet":
+cdef extern from "dynet/index-tensor.h" namespace "dynet":
     cdef cppclass CIndexTensor "dynet::IndexTensor": 
         CDim d
         pass
@@ -58,6 +60,8 @@ cdef extern from "dynet/tensor.h" namespace "dynet":
         CIndexTensor argmax(CTensor& t, unsigned dim, unsigned num) 
         @staticmethod
         CIndexTensor categorical_sample_log_prob(CTensor& t, unsigned dim, unsigned num) 
+        @staticmethod
+        pair[CTensor, CIndexTensor] topk(CTensor& t, unsigned dim, unsigned num)
 
 cdef extern from "dynet/model.h" namespace "dynet":
     cdef cppclass CParameterStorage "dynet::ParameterStorage":
@@ -104,6 +108,8 @@ cdef extern from "dynet/model.h" namespace "dynet":
         CModel()
         #float gradient_l2_norm() const
         CParameters add_parameters(CDim& d)
+        CParameters set_weight_decay_lambda(float lam)
+        float get_weight_decay_lambda()
         CParameters add_parameters(CDim& d, CParameterInit initializer, string name) except +
         CParameters add_parameters(CDim& d, CParameterInit initializer, string name, CDevice *device) except +
         #CLookupParameters add_lookup_parameters(unsigned n, const CDim& d)
@@ -182,7 +188,7 @@ cdef extern from "dynet/dynet.h" namespace "dynet":
         const CTensor& incremental_forward(VariableIndex index) except +
         const CTensor& get_value(VariableIndex i) except +
         void invalidate()
-        void backward(VariableIndex i, bool full)
+        void backward(VariableIndex i, bool full) except +
 
         # checkpointing
         void checkpoint()
@@ -230,6 +236,9 @@ cdef extern from "dynet/training.h" namespace "dynet":
     cdef cppclass CAdamTrainer "dynet::AdamTrainer" (CTrainer):
         CAdamTrainer(CModel& m, float alpha, float beta_1, float beta_2, float eps) # TODO removed lam, update docs
 
+    cdef cppclass CAmsgradTrainer "dynet::AmsgradTrainer" (CTrainer):
+        CAmsgradTrainer(CModel& m, float alpha, float beta_1, float beta_2, float eps) # TODO removed lam, update docs
+
 cdef extern from "dynet/devices.h" namespace "dynet":
     cdef cppclass CDevice "dynet::Device":
         string name
@@ -259,6 +268,10 @@ cdef extern from "dynet/expr.h" namespace "dynet":
     CExpression c_input "dynet::input" (CComputationGraph& g, CDim& d, vector[float]* pdata, CDevice* device) except +
     CExpression c_input "dynet::input" (CComputationGraph& g, CDim& d, vector[unsigned]& ids, vector[float]& data, float defdata) except +
     CExpression c_input "dynet::input" (CComputationGraph& g, CDim& d, vector[unsigned]& ids, vector[float]& data, float defdata, CDevice* device) except +
+    CExpression c_one_hot "dynet::one_hot" (CComputationGraph& g, unsigned d, unsigned idx, CDevice* device) except +
+    CExpression c_one_hot "dynet::one_hot" (CComputationGraph& g, unsigned d, vector[unsigned]& ids, CDevice* device) except +
+    CExpression c_one_hot "dynet::one_hot" (CComputationGraph& g, unsigned d, vector[unsigned]& ids) except +
+
     CExpression c_parameter "dynet::parameter" (CComputationGraph& g, CParameters p) except + #
     CExpression c_parameter "dynet::parameter" (CComputationGraph& g, CLookupParameters p) except + #
     CExpression c_const_parameter "dynet::const_parameter" (CComputationGraph& g, CParameters p) except + #
@@ -272,20 +285,26 @@ cdef extern from "dynet/expr.h" namespace "dynet":
     CExpression c_zeros "dynet::zeros" (CComputationGraph& g, CDim& d) except + #
     CExpression c_ones "dynet::ones" (CComputationGraph& g, CDim& d) except + #
     CExpression c_constant "dynet::constant" (CComputationGraph& g, CDim& d, float val) except + #
-    CExpression c_random_normal "dynet::random_normal" (CComputationGraph& g, CDim& d) except + #
+    CExpression c_random_normal "dynet::random_normal" (CComputationGraph& g, CDim& d, float m, float s) except + #
     CExpression c_random_bernoulli "dynet::random_bernoulli" (CComputationGraph& g, CDim& d, float p, float scale) except +
     CExpression c_random_uniform "dynet::random_uniform" (CComputationGraph& g, CDim& d, float left, float right) except + #
     CExpression c_random_gumbel "dynet::random_gumbel" (CComputationGraph& g, CDim& d, float left, float right) except + #
 
-    # identity function, but derivative is not propagated through it
     CExpression c_nobackprop "dynet::nobackprop" (CExpression& x) except + #
-    # identity function, but derivative takes negative as propagated through it
     CExpression c_flip_gradient "dynet::flip_gradient" (CExpression& x) except + #
+    CExpression c_scale_gradient "dynet::scale_gradient" (CExpression& x, float lambd) except + #
+    
+    cdef enum c_ArgmaxGradient "dynet:ArgmaxGradient":
+        zero_gradient,
+        straight_through_gradient
+
+    CExpression c_argmax "dynet::argmax" (CExpression& x, c_ArgmaxGradient gradient_mode) except + #
     
     CExpression c_op_neg "dynet::operator-" (CExpression& x) except + #
     CExpression c_op_add "dynet::operator+" (CExpression& x, CExpression& y) except + #
     CExpression c_op_scalar_add "dynet::operator+" (CExpression& x, float y) except + #
     CExpression c_op_mul "dynet::operator*" (CExpression& x, CExpression& y) except + #
+    CExpression c_op_div "dynet::operator/" (CExpression& x, CExpression& y) except + #
     CExpression c_op_scalar_mul "dynet::operator*" (CExpression& x, float y) except + #
     CExpression c_op_scalar_div "dynet::operator/" (CExpression& x, float y) except + #
     CExpression c_op_scalar_sub "dynet::operator-" (float y, CExpression& x) except + #
@@ -298,7 +317,18 @@ cdef extern from "dynet/expr.h" namespace "dynet":
 
     CExpression c_colwise_add "dynet::colwise_add" (CExpression& x, CExpression& bias) except + #
 
+    CExpression c_sin "dynet::sin" (CExpression& x) except + #
+    CExpression c_cos "dynet::cos" (CExpression& x) except + #
+    CExpression c_tan "dynet::tan" (CExpression& x) except + #
+    CExpression c_asin "dynet::asin" (CExpression& x) except + #
+    CExpression c_acos "dynet::acos" (CExpression& x) except + #
+    CExpression c_atan "dynet::atan" (CExpression& x) except + #
+    CExpression c_sinh "dynet::sinh" (CExpression& x) except + #
+    CExpression c_cosh "dynet::cosh" (CExpression& x) except + #
     CExpression c_tanh "dynet::tanh" (CExpression& x) except + #
+    CExpression c_asinh "dynet::asinh" (CExpression& x) except + #
+    CExpression c_acosh "dynet::acosh" (CExpression& x) except + #
+    CExpression c_atanh "dynet::atanh" (CExpression& x) except + #
     CExpression c_exp "dynet::exp" (CExpression& x) except + #
     CExpression c_square "dynet::square" (CExpression& x) except + #
     CExpression c_sqrt "dynet::sqrt" (CExpression& x) except + #
@@ -306,6 +336,7 @@ cdef extern from "dynet/expr.h" namespace "dynet":
     CExpression c_erf "dynet::erf" (CExpression& x) except + #
     CExpression c_cube "dynet::cube" (CExpression& x) except + #
     CExpression c_log "dynet::log" (CExpression& x) except + #
+    CExpression c_log_sigmoid "dynet::log_sigmoid" (CExpression& x) except + #
     CExpression c_lgamma "dynet::lgamma" (CExpression& x) except + #
     CExpression c_logistic "dynet::logistic" (CExpression& x) except + #
     CExpression c_rectify "dynet::rectify" (CExpression& x) except + #        
@@ -318,6 +349,7 @@ cdef extern from "dynet/expr.h" namespace "dynet":
     CExpression c_softmax "dynet::softmax" (CExpression& x, unsigned d) except + #
     CExpression c_sparsemax "dynet::sparsemax" (CExpression& x) except + #
     CExpression c_softsign "dynet::softsign" (CExpression& x) except + #
+    CExpression c_constrained_softmax "dynet::constrained_softmax" (CExpression& x, CExpression &y) except + #
     CExpression c_pow "dynet::pow" (CExpression& x, CExpression& y) except + #
     CExpression c_bmin "dynet::min" (CExpression& x, CExpression& y) except + #
     CExpression c_bmax "dynet::max" (CExpression& x, CExpression& y) except + #
@@ -337,6 +369,8 @@ cdef extern from "dynet/expr.h" namespace "dynet":
     CExpression c_trace_of_product "dynet::trace_of_product" (CExpression& x, CExpression& y) except +;
 
     CExpression c_dot_product "dynet::dot_product" (CExpression& x, CExpression& y) except + #
+    CExpression c_circ_conv "dynet::circ_conv" (CExpression& u, CExpression& v) except + #
+    CExpression c_circ_corr "dynet::circ_corr" (CExpression& u, CExpression& v) except + #
     CExpression c_squared_distance "dynet::squared_distance" (CExpression& x, CExpression& y) except + #
     CExpression c_squared_norm "dynet::squared_norm" (CExpression& x) except + #
     CExpression c_l2_norm "dynet::l2_norm" (CExpression& x) except + #
@@ -361,6 +395,7 @@ cdef extern from "dynet/expr.h" namespace "dynet":
     CExpression c_sum_batches "dynet::sum_batches" (CExpression& x) except +
     CExpression c_sum_rows "dynet::sum_rows" (CExpression& x) except +               #
     CExpression c_sum_cols "dynet::sum_cols" (CExpression& x) except +               #
+    CExpression c_cumsum "dynet::cumsum" (CExpression& x, unsigned d) except +               #
     CExpression c_moment_elems "dynet::moment_elems" (CExpression& x, unsigned r) except +
     CExpression c_moment_dim "dynet::moment_dim" (CExpression& x, vector[unsigned] dims, unsigned r, bool b, unsigned n) except +
     CExpression c_moment_batches "dynet::moment_batches" (CExpression& x, unsigned r) except +
@@ -380,6 +415,8 @@ cdef extern from "dynet/expr.h" namespace "dynet":
 
     CExpression c_pick_batch_elems "dynet::pick_batch_elems" (CExpression& x, vector[unsigned] vs) except + #
     CExpression c_pick_batch_elem "dynet::pick_batch_elem" (CExpression& x, unsigned v) except + #
+    CExpression c_strided_select "dynet::strided_select" (CExpression& x, vector[int] strides, vector[int] range_from, vector[int] range_to) except +
+
     CExpression c_pickneglogsoftmax "dynet::pickneglogsoftmax" (CExpression& x, unsigned v) except + #
     CExpression c_pickneglogsoftmax "dynet::pickneglogsoftmax" (CExpression& x, vector[unsigned] vs) except + #
 
@@ -445,6 +482,9 @@ cdef extern from "dynet/rnn.h" namespace "dynet":
         CSimpleRNNBuilder()
         CSimpleRNNBuilder(unsigned layers, unsigned input_dim, unsigned hidden_dim, CModel &model)
 
+        void set_dropout(float d, float d_h)
+        void set_dropout_masks(unsigned batch_size)
+
         vector[vector[CParameters]] params
         vector[vector[CExpression]] param_vars
 
@@ -467,7 +507,7 @@ cdef extern from "dynet/lstm.h" namespace "dynet":
 
     cdef cppclass CVanillaLSTMBuilder "dynet::VanillaLSTMBuilder" (CRNNBuilder):
         CVanillaLSTMBuilder()
-        CVanillaLSTMBuilder(unsigned layers, unsigned input_dim, unsigned hidden_dim, CModel &model, bool ln_lstm)
+        CVanillaLSTMBuilder(unsigned layers, unsigned input_dim, unsigned hidden_dim, CModel &model, bool ln_lstm, float forget_bias)
         void set_dropout(float d, float d_r)
         void set_dropout_masks(unsigned batch_size)
 

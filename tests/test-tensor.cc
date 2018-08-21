@@ -4,6 +4,7 @@
 #include <dynet/dynet.h>
 #include <dynet/expr.h>
 #include <dynet/grad-check.h>
+#include <dynet/index-tensor.h>
 #include <boost/test/unit_test.hpp>
 #include "test.h"
 #include <stdexcept>
@@ -57,6 +58,23 @@ BOOST_AUTO_TEST_CASE( argmax ) {
   vector<Eigen::DenseIndex> idx_exp = {1, 2};
   BOOST_CHECK_EQUAL_COLLECTIONS(idx_exp.begin(), idx_exp.end(),
                                 idx_act.begin(), idx_act.end());
+}
+
+// test whether topk is working properly
+BOOST_AUTO_TEST_CASE(topk) {
+  dynet::ComputationGraph cg;
+  Expression x1 = input(cg, Dim({3}, 2), batch_vals);
+  std::pair<Tensor, IndexTensor> rets = TensorTools::topk(x1.value());
+  // idx
+  vector<Eigen::DenseIndex> idx_act = as_vector(rets.second);
+  vector<Eigen::DenseIndex> idx_exp = {1, 2};
+  BOOST_CHECK_EQUAL_COLLECTIONS(idx_exp.begin(), idx_exp.end(),
+    idx_act.begin(), idx_act.end());
+  // val
+  vector<float> val_act = as_vector(rets.first);
+  vector<float> val_exp = {2.f, 6.f};
+  BOOST_CHECK_EQUAL_COLLECTIONS(val_act.begin(), val_act.end(),
+    val_exp.begin(), val_exp.end());
 }
 
 // for now, just make sure that things don't die

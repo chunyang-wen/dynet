@@ -2,7 +2,7 @@
 #define DYNET_NODES_SELECT_H_
 
 #include "dynet/dynet.h"
-#include "dynet/nodes-macros.h"
+#include "dynet/nodes-def-macros.h"
 
 namespace dynet {
 
@@ -77,6 +77,21 @@ struct PickBatchElements : public Node {
   const unsigned* pval;
   std::vector<unsigned> vals;
   const std::vector<unsigned>* pvals;
+};
+// x is a batched tensor
+// y = (x)_{[*pval]}
+struct StridedSelect : public Node {
+  explicit StridedSelect(const std::initializer_list<VariableIndex>& a, const std::vector<int>& strides,
+                         const std::vector<int>& from, const std::vector<int>& to, bool inplaced=false)
+                        : Node(a), strides(strides), from(from), to(to) {
+    if(inplaced){
+      forward_inplace_state = INPLACE_TYPE::READ;
+      backward_inplace_state = INPLACE_TYPE::WRITE;
+    }
+  }
+  DYNET_NODE_DEFINE_DEV_IMPL()
+  virtual bool supports_multibatch() const override { return true; }
+  const std::vector<int> strides, from, to;
 };
 
 } // namespace dynet

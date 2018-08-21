@@ -1,8 +1,25 @@
 Installing DyNet for Python
 ===========================
 
+Installing a Release CPU Version
+--------------------------------
+
 Python bindings to DyNet are supported for both Python 2.x and 3.x.
-Before installing DyNet, you will need to make sure that several packages are installed.
+If you want to install a release version of DyNet and don't need to run on GPU, you can
+simply run
+
+::
+
+    pip install dynet
+
+
+Installing a Cutting-edge and/or GPU Version
+--------------------------------------------
+
+If you want the most recent features of DyNet from the development branch, or want GPU
+compute capability, you'll want to install DyNet from source.
+
+Before doing so, you will need to make sure that several packages are installed.
 For example on **Ubuntu Linux**:
 
 ::
@@ -48,7 +65,13 @@ DyNet is installed):
 
     git+https://github.com/clab/dynet#egg=dynet
 
-In case installation using `pip` fails, if you copy-and-paste the entire log that you
+You can also manually set the directory of the cuDNN library as follows:
+
+.. code:: bash
+
+    CUDNN_ROOT=/path/to/cudnn BACKEND=cuda pip install git+https://github.com/clab/dynet#egg=dynet
+
+If installation using `pip` fails, if you copy-and-paste the entire log that you
 get after running the `pip` command into a `github issue <https://github.com/clab/dynet/issues>`_,
 we will help you debug. You can also try to install DyNet manually as listed below.
 
@@ -66,7 +89,7 @@ The following is a list of all the commands needed to perform a manual install:
     cd dynet-base
     # getting dynet and eigen
     git clone https://github.com/clab/dynet.git
-    hg clone https://bitbucket.org/eigen/eigen -r 699b659  # -r NUM specified a known working revision
+    hg clone https://bitbucket.org/eigen/eigen -r b2e267d  # -r NUM specified a known working revision
     cd dynet
     mkdir build
     cd build
@@ -105,7 +128,7 @@ Then get Eigen:
 
     cd $HOME
     cd dynet-base
-    hg clone https://bitbucket.org/eigen/eigen/ -r 346ecdb
+    hg clone https://bitbucket.org/eigen/eigen/ -r b2e267d
     
 (`-r NUM` specifies a known working revision of Eigen. You can remove this in order to get the bleeding
 edge Eigen, with the risk of some compile breaks, and the possible benefit of added optimizations.)
@@ -201,6 +224,8 @@ If it doesn't work and you get an error similar to the following:
 
 then you may need to run the following (and add it to your shell init files):
 
+.. code:: bash
+
     # OSX 
     export DYLD_LIBRARY_PATH=/path/to/dynet/build/dynet/:$DYLD_LIBRARY_PATH
     # Linux
@@ -260,9 +285,14 @@ The installation process is pretty much the same, while adding the
 
     cmake .. -DEIGEN3_INCLUDE_DIR=$PATH_TO_EIGEN -DPYTHON=$PATH_TO_PYTHON -DBACKEND=cuda
 
-(if CUDA is installed in a non-standard location and ``cmake`` cannot
+
+If you know the CUDA architecture supported by your GPU (e.g. by referencing
+`this page <http://arnon.dk/matching-sm-architectures-arch-and-gencode-for-various-nvidia-cards/>`__)
+you can speed compilation significantly by adding ``-DCUDA_ARCH=XXX`` where
+``XXX`` is your architecture number.
+If CUDA is installed in a non-standard location and ``cmake`` cannot
 find it, you can specify also
-``-DCUDA_TOOLKIT_ROOT_DIR=/path/to/cuda``.)
+``-DCUDA_TOOLKIT_ROOT_DIR=/path/to/cuda``.
 
 Now, build the Python modules (as above, we assume Cython is installed):
 
@@ -274,11 +304,10 @@ As before, ``cd build/python`` followed by
 cuDNN support
 ~~~~~~~~~~~~~
 
-When running DyNet with CUDA on GPUs, some of DyNet's functionalities
-(e.g. conv2d) will depend on the `NVIDIA cuDNN libraries <https://developer.nvidia.com/cudnn>`__.
-CMake will automatically detect cuDNN in the suggested installation path 
-by NVIDIA (i.e. ``/usr/local/cuda``) and enable those functionalities 
-if detected.
+When running DyNet with CUDA on GPUs, some of DyNet's functionality
+(e.g. conv2d) depends on the `NVIDIA cuDNN libraries <https://developer.nvidia.com/cudnn>`__.
+CMake will automatically detect cuDNN in the CUDA installation path 
+(i.e. ``/usr/local/cuda``) and enable it if detected.
 
 If CMake is unable to find cuDNN automatically, try setting `CUDNN_ROOT`, such as
 
@@ -286,12 +315,9 @@ If CMake is unable to find cuDNN automatically, try setting `CUDNN_ROOT`, such a
 
     -DCUDNN_ROOT="/path/to/CUDNN"
 
-. However, if you don't have cuDNN installed, those dependend functionalities 
+However, if you don't have cuDNN installed, the dependent functionality
 will be automatically disabled and an error will be throwed during runtime if you try
 to use them.
-
-Currently, DyNet supports cuDNN v5.1, future versions will also be supported soon.
-
 
 Using the GPU from Python
 ~~~~~~~~~~~~~~~~~~~~~~~~~

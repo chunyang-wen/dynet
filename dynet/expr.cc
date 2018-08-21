@@ -3,16 +3,38 @@
 #include <initializer_list>
 
 #include "dynet/nodes.h"
+#include "dynet/devices.h"
 
 namespace dynet {
 
 using std::vector;
+
+std::string Expression::get_device_name() const {
+  if (pg->nodes[i]->device == nullptr)
+    throw std::runtime_error("Unknown device for node:" + std::to_string(i));
+  return pg->nodes[i]->device->name;
+}
 
 Expression input(ComputationGraph& g, real s, Device *device) { return Expression(&g, g.add_input(s, device)); }
 Expression input(ComputationGraph& g, const real *ps, Device *device) { return Expression(&g, g.add_input(ps, device)); }
 Expression input(ComputationGraph& g, const Dim& d, const vector<float>& data, Device *device) { return Expression(&g, g.add_input(d, data, device)); }
 Expression input(ComputationGraph& g, const Dim& d, const vector<float>* pdata, Device *device) { return Expression(&g, g.add_input(d, pdata, device)); }
 Expression input(ComputationGraph& g, const Dim& d, const vector<unsigned int>& ids, const vector<float>& data, float defdata, Device *device) { return Expression(&g, g.add_input(d, ids, data, device, defdata)); }
+Expression one_hot(ComputationGraph& g, unsigned int d, unsigned int idx, Device *device) {
+  Dim dim({d});
+  vector<unsigned int> ids = {idx};
+  vector<float> data = {1.0};
+  return Expression(&g, g.add_input(dim, ids, data, device, 0.0));
+}
+Expression one_hot(ComputationGraph& g, unsigned int d, const std::vector<unsigned int>& ids, Device *device) {
+  unsigned batch_size = ids.size();
+  Dim dim({d}, batch_size);
+  vector<unsigned int> flat_ids(batch_size);
+  for (unsigned int b=0; b<batch_size; b++)
+    flat_ids[b] = b * d + ids[b];
+  vector<float> data(batch_size, 1.0);
+  return Expression(&g, g.add_input(dim, flat_ids, data, device, 0.0));
+}
 Expression const_parameter(ComputationGraph& g, Parameter p) { return Expression(&g, g.add_const_parameters(p)); }
 Expression const_parameter(ComputationGraph& g, LookupParameter p) { return Expression(&g, g.add_const_parameters(p)); }
 Expression parameter(ComputationGraph& g, Parameter p) { return Expression(&g, g.add_parameters(p)); }
@@ -29,15 +51,16 @@ Expression zeros(ComputationGraph& g, const Dim& d) { return Expression(&g, g.ad
 // Expression zeroes(ComputationGraph& g, const Dim& d) {return zeros(g, d);}
 Expression ones(ComputationGraph& g, const Dim& d) { return Expression(&g, g.add_function<Constant>(d, 1.f)); }
 Expression constant(ComputationGraph& g, const Dim& d, float val) { return Expression(&g, g.add_function<Constant>(d, val)); }
-Expression random_normal(ComputationGraph& g, const Dim& d) { return Expression(&g, g.add_function<RandomNormal>(d)); }
+Expression random_normal(ComputationGraph& g, const Dim& d, float mean, float stddev) { return Expression(&g, g.add_function<RandomNormal>(d, mean, stddev)); }
 Expression random_bernoulli(ComputationGraph& g, const Dim& d, real p, real scale) { return Expression(&g, g.add_function<RandomBernoulli>({}, d, p, scale)); }
 Expression random_uniform(ComputationGraph& g, const Dim& d, real left, real right) { return Expression(&g, g.add_function<RandomUniform>({}, d, left, right)); }
 Expression random_gumbel(ComputationGraph& g, const Dim& d, real mu, real beta) { return Expression(&g, g.add_function<RandomGumbel>({}, d, mu, beta)); }
 
-// identity function, but derivative is not propagated through it
 Expression nobackprop(const Expression& x) { return Expression(x.pg, x.pg->add_function<NoBackprop>({x.i})); }
-// identity function, but derivative is propagated as negative
-Expression flip_gradient(const Expression& x) { return Expression(x.pg, x.pg->add_function<FlipGradient>({x.i})); }
+Expression flip_gradient(const Expression& x) { return Expression(x.pg, x.pg->add_function<ScaleGradient>({x.i}, -1.f)); }
+Expression scale_gradient(const Expression& x, float lambd) { return Expression(x.pg, x.pg->add_function<ScaleGradient>({x.i}, lambd)); }
+
+Expression argmax(const Expression& x, ArgmaxGradient gradient_mode) { return Expression(x.pg, x.pg->add_function<Argmax>({x.i}, 0, (gradient_mode==straight_through_gradient))); }
 
 Expression operator-(const Expression& x) { return Expression(x.pg, x.pg->add_function<Negate>({x.i})); }
 Expression operator+(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<CwiseSum>({x.i, y.i}));}
@@ -49,6 +72,7 @@ Expression operator-(real x, const Expression& y) { return Expression(y.pg, y.pg
 Expression operator-(const Expression& x, real y) { return -(y - x); }
 Expression operator*(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<MatrixMultiply>({x.i, y.i})); }
 Expression operator*(const Expression& x, float y) { return Expression(x.pg, x.pg->add_function<ConstScalarMultiply>({x.i}, y)); }
+Expression operator/(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<CwiseQuotient>({x.i, y.i})); }
 Expression cmult(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<CwiseMultiply>({x.i, y.i})); }
 Expression cdiv(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<CwiseQuotient>({x.i, y.i})); }
 Expression colwise_add(const Expression& x, const Expression& bias) { return Expression(x.pg, x.pg->add_function<AddVectorToAllColumns>({x.i, bias.i})); }
@@ -60,7 +84,19 @@ Expression contract3d_1d(const Expression& x, const Expression& y, const Express
 Expression sqrt(const Expression& x) { return Expression(x.pg, x.pg->add_function<Sqrt>({x.i})); }
 Expression abs(const Expression& x) { return Expression(x.pg, x.pg->add_function<Abs>({x.i})); }
 Expression erf(const Expression& x) { return Expression(x.pg, x.pg->add_function<Erf>({x.i})); }
+Expression sin(const Expression& x) { return Expression(x.pg, x.pg->add_function<Sin>({x.i})); }
+Expression cos(const Expression& x) { return Expression(x.pg, x.pg->add_function<Cos>({x.i})); }
+Expression tan(const Expression& x) { return Expression(x.pg, x.pg->add_function<Tan>({x.i})); }
+Expression asin(const Expression& x) { return Expression(x.pg, x.pg->add_function<Asin>({x.i})); }
+Expression acos(const Expression& x) { return Expression(x.pg, x.pg->add_function<Acos>({x.i})); }
+Expression atan(const Expression& x) { return Expression(x.pg, x.pg->add_function<Atan>({x.i})); }
+Expression sinh(const Expression& x) { return Expression(x.pg, x.pg->add_function<Sinh>({x.i})); }
+Expression cosh(const Expression& x) { return Expression(x.pg, x.pg->add_function<Cosh>({x.i})); }
 Expression tanh(const Expression& x) { return Expression(x.pg, x.pg->add_function<Tanh>({x.i})); }
+Expression asinh(const Expression& x) { return Expression(x.pg, x.pg->add_function<Asinh>({x.i})); }
+Expression acosh(const Expression& x) { return Expression(x.pg, x.pg->add_function<Acosh>({x.i})); }
+Expression atanh(const Expression& x) { return Expression(x.pg, x.pg->add_function<Atanh>({x.i})); }
+Expression log_sigmoid(const Expression& x) { return Expression(x.pg, x.pg->add_function<LogSigmoid>({x.i})); }
 Expression lgamma(const Expression& x) { return Expression(x.pg, x.pg->add_function<LogGamma>({x.i})); }
 Expression log(const Expression& x) { return Expression(x.pg, x.pg->add_function<Log>({x.i})); }
 Expression exp(const Expression& x) { return Expression(x.pg, x.pg->add_function<Exp>({x.i})); }
@@ -86,6 +122,7 @@ Expression sparsemax(const Expression& x) { return Expression(x.pg, x.pg->add_fu
 Expression sparsemax_loss(const Expression& x, const vector<unsigned>& target_support) { return Expression(x.pg, x.pg->add_function<SparsemaxLoss>({x.i}, target_support)); }
 Expression sparsemax_loss(const Expression& x, const vector<unsigned>* ptarget_support) { return Expression(x.pg, x.pg->add_function<SparsemaxLoss>({x.i}, ptarget_support)); }
 Expression softmax(const Expression& x, unsigned d) { return Expression(x.pg, x.pg->add_function<Softmax>({x.i}, d)); }
+Expression constrained_softmax(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<ConstrainedSoftmax>({x.i, y.i})); }
 Expression softsign(const Expression& x) { return Expression(x.pg, x.pg->add_function<SoftSign>({x.i})); }
 Expression pow(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<Pow>({x.i, y.i})); }
 Expression min(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<Min>({x.i, y.i})); }
@@ -112,6 +149,8 @@ Expression squared_norm(const Expression& x) { return Expression(x.pg, x.pg->add
 Expression l2_norm(const Expression& x) { return Expression(x.pg, x.pg->add_function<L2Norm>({x.i})); }
 
 Expression dot_product(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<DotProduct>({x.i, y.i})); }
+Expression circ_conv(const Expression& u, const Expression& v) { return Expression(u.pg, u.pg->add_function<CircularConvolution>({u.i, v.i})); }
+Expression circ_corr(const Expression& u, const Expression& v) { return Expression(u.pg, u.pg->add_function<CircularCorrelation>({u.i, v.i})); }
 Expression squared_distance(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<SquaredEuclideanDistance>({x.i, y.i})); }
 Expression huber_distance(const Expression& x, const Expression& y, real c) { return Expression(x.pg, x.pg->add_function<HuberDistance>({x.i, y.i}, c)); }
 Expression l1_distance(const Expression& x, const Expression& y) { return Expression(x.pg, x.pg->add_function<L1Distance>({x.i, y.i})); }
@@ -150,6 +189,14 @@ Expression pickrange(const Expression& x, unsigned v, unsigned u) {
   return Expression(x.pg, x.pg->add_function<PickRange>({x.i}, v, u, 0));
 }
 
+Expression strided_select(const Expression& x, const std::vector<int>& strides, const std::vector<int>& range_from, const std::vector<int>& range_to) {
+  bool inplaced = true;
+  for(unsigned d=0;d<strides.size();d++){ if(strides[d]!=1) inplaced = false; }
+  for(unsigned d=0;d<range_from.size();d++){ if(range_from[d]!=0) inplaced = false; }
+  for(unsigned d=0;d<range_to.size() && d<x.dim().nd;d++){ if(range_to[d]!=x.dim()[d]) inplaced = false; }
+  return Expression(x.pg, x.pg->add_function<StridedSelect>({x.i}, strides, range_from, range_to, inplaced));
+}
+
 Expression pickneglogsoftmax(const Expression& x, unsigned v) { return Expression(x.pg, x.pg->add_function<PickNegLogSoftmax>({x.i}, v)); }
 Expression pickneglogsoftmax(const Expression& x, const vector<unsigned> & v) { return Expression(x.pg, x.pg->add_function<PickNegLogSoftmax>({x.i}, v)); }
 Expression pickneglogsoftmax(const Expression& x, const unsigned* pv) { return Expression(x.pg, x.pg->add_function<PickNegLogSoftmax>({x.i}, pv)); }
@@ -160,6 +207,8 @@ Expression sum_dim(const Expression& x, const vector<unsigned>& dims, bool b) { 
 Expression sum_rows(const Expression& x) { return Expression(x.pg, x.pg->add_function<SumDimension>({x.i}, vector<unsigned>({0}), false)); }
 Expression sum_cols(const Expression& x) { return Expression(x.pg, x.pg->add_function<SumDimension>({x.i}, vector<unsigned>({1}), false)); }
 Expression sum_elems(const Expression& x) { return Expression(x.pg, x.pg->add_function<SumElements>({x.i})); }
+
+Expression cumsum(const Expression& x, unsigned d) { return Expression(x.pg, x.pg->add_function<CumulativeSum>({x.i}, d)); }
 
 Expression sum_batches(const Expression& x) { return Expression(x.pg, x.pg->add_function<SumDimension>({x.i}, vector<unsigned>(), true)); }
 
@@ -247,5 +296,33 @@ Expression to_device(const Expression & x, Device *device) {
   DYNET_ASSERT(x.pg->nodes[x.i]->device != device, "It is unnecessary to perform to_device operation in the same devices");
   return Expression(x.pg, x.pg->add_function<ToDevice>({x.i}, device));
 }
+
+////////////////////////////////////////////////
+// Functions with variable argument lengths   //
+////////////////////////////////////////////////
+
+Expression affine_transform(const std::initializer_list<Expression> &xs) { return detail::f<AffineTransform>(xs); }
+Expression affine_transform(const std::vector<Expression> &xs) { return detail::f<AffineTransform>(xs); }
+
+Expression sum(const std::initializer_list<Expression> &xs) { return detail::f<Sum>(xs); }
+Expression sum(const std::vector<Expression> &xs) { return detail::f<Sum>(xs); }
+
+Expression concatenate_to_batch(const std::initializer_list<Expression> &xs) { return detail::f<ConcatenateToBatch>(xs); }
+Expression concatenate_to_batch(const std::vector<Expression> &xs) { return detail::f<ConcatenateToBatch>(xs); }
+
+Expression average(const std::initializer_list<Expression> &xs) { return detail::f<Average>(xs); }
+Expression average(const std::vector<Expression> &xs) { return detail::f<Average>(xs); }
+
+Expression max(const std::initializer_list<Expression> &xs) { return detail::f<Max>(xs); }
+Expression max(const std::vector<Expression> &xs) { return detail::f<Max>(xs); }
+
+Expression logsumexp(const std::initializer_list<Expression> &xs) { return detail::f<LogSumExp>(xs); }
+Expression logsumexp(const std::vector<Expression> &xs) { return detail::f<LogSumExp>(xs); }
+
+Expression concatenate_cols(const std::initializer_list<Expression> &xs) { return detail::f<Concatenate>(xs, 1); }
+Expression concatenate_cols(const std::vector<Expression> &xs) { return detail::f<Concatenate>(xs, 1); }
+
+Expression concatenate(const std::initializer_list<Expression> &xs, unsigned d) { return detail::f<Concatenate>(xs, d); }
+Expression concatenate(const std::vector<Expression> &xs, unsigned d) { return detail::f<Concatenate>(xs, d); }
 
 }  // namespace dynet

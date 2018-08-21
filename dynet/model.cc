@@ -1,10 +1,12 @@
 #include "dynet/model.h"
 #include "dynet/tensor.h"
+#include "dynet/tensor-eigen.h"
 #include "dynet/aligned-mem-pool.h"
 #include "dynet/dynet.h"
 #include "dynet/param-init.h"
 #include "dynet/io.h"
 #include "dynet/except.h"
+#include "dynet/devices.h"
 
 #include <iostream>
 #include <fstream>
@@ -255,7 +257,7 @@ float LookupParameter::current_weight_decay() const {
   return get_storage().owner->get_weight_decay().current_weight_decay();
 }
 
-ParameterCollectionStorage::ParameterCollectionStorage()
+ParameterCollectionStorage::ParameterCollectionStorage(float weight_decay_lambda)
     : gradient_norm_scratch(nullptr), device_manager(get_device_manager()) {
   weight_decay.set_lambda(weight_decay_lambda);
 }
@@ -285,18 +287,19 @@ void ParameterCollectionStorage::project_weights(float radius) {
   cerr << "NORM: " << sqrt(gg) << endl;
 }
 
-ParameterCollection::ParameterCollection() : name("/"), storage(new ParameterCollectionStorage), parent(nullptr) { }
+ParameterCollection::ParameterCollection() : name("/"), storage(new ParameterCollectionStorage(default_weight_decay_lambda)), parent(nullptr) { }
 
-ParameterCollection::ParameterCollection(const string & my_name, ParameterCollection* my_parent) :
-    name(my_name), storage(new ParameterCollectionStorage), parent(my_parent) { }
+ParameterCollection::ParameterCollection(const string & my_name, ParameterCollection* my_parent, float weight_decay_lambda) :
+    name(my_name), storage(new ParameterCollectionStorage(weight_decay_lambda)), parent(my_parent) { }
 
-ParameterCollection ParameterCollection::add_subcollection(const string & sub_name) {
+ParameterCollection ParameterCollection::add_subcollection(const string & sub_name, float weight_decay_lambda) {
+  if (weight_decay_lambda < 0) { weight_decay_lambda = get_weight_decay_lambda(); }
   if (valid_parameter(sub_name)) {
     ostringstream oss; oss << name << sub_name;
     int idx = collec_name_cntr[sub_name]++;
     if (idx > 0 || sub_name.size() == 0) oss << "_" << idx;
     oss << "/";
-    return ParameterCollection(oss.str(), this);
+    return ParameterCollection(oss.str(), this, weight_decay_lambda);
   } else {
     throw std::runtime_error("Submodel name could not include '/' and '_'");
   }
@@ -461,7 +464,7 @@ ParameterCollection::get_lookup_parameter_storages() const {
   while (t->parent != nullptr) { t = t->parent; }
   for (auto & lookup_param: t->get_storage().lookup_params) {
     if (lookup_param->name.find(name) == 0) {
-      lookup_params.push_back(lookup_param); 
+      lookup_params.push_back(lookup_param);
     }
   }
   return lookup_params;
@@ -490,7 +493,7 @@ size_t ParameterCollection::updated_parameter_count() const {
 ParameterCollectionStorage& ParameterCollection::get_storage() {
   if(storage == nullptr) {
     if (parent == nullptr)
-      storage = new ParameterCollectionStorage;
+      storage = new ParameterCollectionStorage(default_weight_decay_lambda);
     else
       DYNET_RUNTIME_ERR("ParameterCollection::get_storage() not implemented yet for subsets");
   }
@@ -500,7 +503,7 @@ ParameterCollectionStorage& ParameterCollection::get_storage() {
 const ParameterCollectionStorage& ParameterCollection::get_storage() const {
   if(storage == nullptr) {
     if (parent == nullptr)
-      const_cast<ParameterCollectionStorage*&>(storage) = new ParameterCollectionStorage;
+      const_cast<ParameterCollectionStorage*&>(storage) = new ParameterCollectionStorage(default_weight_decay_lambda);
     else
       DYNET_RUNTIME_ERR("ParameterCollection::get_storage() not implemented yet for subsets");
   }
@@ -536,7 +539,7 @@ Model::Model() : ParameterCollection() {
 template <class MyDevice>
 void ParameterStorage::squared_l2norm_dev(MyDevice & dev, float* sqnorm) const {
   Tensor sqnorm_t({1}, sqnorm, &dev, DeviceMempool::NONE);
-  sqnorm_t.t<0>().device(*dev.edevice) = values.tvec().square().sum();
+  t<0>(sqnorm_t).device(*dev.edevice) = tvec(values).square().sum();
 }
 DYNET_PARAMNORM_INST_DEV_IMPL(ParameterStorage, squared_l2norm, squared_l2norm_dev)
 
@@ -545,13 +548,13 @@ template <class MyDevice>
 void ParameterStorage::g_squared_l2norm_dev(MyDevice & dev, float* sqnorm) const {
   DYNET_ASSERT(g.v != nullptr, "Cannot take norm of gradient with null parameter");
   Tensor sqnorm_t({1}, sqnorm, &dev, DeviceMempool::NONE);
-  sqnorm_t.t<0>().device(*dev.edevice) = g.tvec().square().sum();
+  t<0>(sqnorm_t).device(*dev.edevice) = tvec(g).square().sum();
 }
 DYNET_PARAMNORM_INST_DEV_IMPL(ParameterStorage, g_squared_l2norm, g_squared_l2norm_dev)
 
 template <class MyDevice>
 void ParameterStorage::accumulate_grad_dev(MyDevice & dev, const Tensor& d) {
-  g.tvec().device(*dev.edevice) += d.tvec();
+  tvec(g).device(*dev.edevice) += tvec(d);
 }
 #ifdef __CUDACC__
 template void ParameterStorage::accumulate_grad_dev<Device_GPU>(Device_GPU & dev, const Tensor& d);
@@ -577,7 +580,7 @@ void ParameterStorage::accumulate_grad(const Tensor& d) {
 
 template <class MyDevice>
 void ParameterStorage::scale_parameters_dev(MyDevice & dev, float a) {
-  values.tvec().device(*dev.edevice) = values.tvec() * a;
+  tvec(values).device(*dev.edevice) = tvec(values) * a;
 }
 #ifdef __CUDACC__
 template void ParameterStorage::scale_parameters_dev<Device_GPU>(Device_GPU & dev, float a);
@@ -599,7 +602,7 @@ void ParameterStorage::scale_parameters(float a) {
 
 template <class MyDevice>
 void ParameterStorage::scale_gradient_dev(MyDevice & dev, float a) {
-  g.tvec().device(*dev.edevice) = g.tvec() * a;
+  tvec(g).device(*dev.edevice) = tvec(g) * a;
 }
 #ifdef __CUDACC__
 template void ParameterStorage::scale_gradient_dev<Device_GPU>(Device_GPU & dev, float a);
@@ -653,7 +656,7 @@ void LookupParameterStorage::initialize(unsigned index, const vector<float>& val
 template <class MyDevice>
 void LookupParameterStorage::squared_l2norm_dev(MyDevice & dev, float* sqnorm) const {
   Tensor sqnorm_t({1}, sqnorm, &dev, DeviceMempool::NONE);
-  sqnorm_t.t<0>().device(*dev.edevice) = all_values.tvec().square().sum();
+  t<0>(sqnorm_t).device(*dev.edevice) = tvec(all_values).square().sum();
 }
 DYNET_PARAMNORM_INST_DEV_IMPL(LookupParameterStorage, squared_l2norm, squared_l2norm_dev)
 
@@ -663,11 +666,11 @@ void LookupParameterStorage::g_squared_l2norm_dev(MyDevice & dev, float* sqnorm)
   TensorTools::zero(sqnorm_t);
   // TODO: the GPU part is hacky, probably need a better heuristic
   if (all_grads.device->type == DeviceType::GPU || all_updated) {
-    sqnorm_t.t<0>().device(*dev.edevice) += all_grads.tvec().square().sum();
+    t<0>(sqnorm_t).device(*dev.edevice) += tvec(all_grads).square().sum();
   } else {
     auto it = non_zero_grads.begin();
     while (it != non_zero_grads.end())
-      sqnorm_t.t<0>().device(*dev.edevice) += grads[*(it++)].tvec().square().sum();
+      t<0>(sqnorm_t).device(*dev.edevice) += tvec(grads[*(it++)]).square().sum();
   }
 }
 DYNET_PARAMNORM_INST_DEV_IMPL(LookupParameterStorage, g_squared_l2norm, g_squared_l2norm_dev)
@@ -675,7 +678,7 @@ DYNET_PARAMNORM_INST_DEV_IMPL(LookupParameterStorage, g_squared_l2norm, g_square
 template <class MyDevice>
 void LookupParameterStorage::accumulate_grad_dev(MyDevice & dev, const Tensor& d) {
   all_updated = true;
-  all_grads.tvec().device(*dev.edevice) += d.tvec();
+  tvec(all_grads).device(*dev.edevice) += tvec(d);
 }
 #ifdef __CUDACC__
 template void LookupParameterStorage::accumulate_grad_dev<Device_GPU>(Device_GPU & dev, const Tensor& d);
@@ -700,7 +703,7 @@ void LookupParameterStorage::accumulate_grad(const Tensor& d) {
 template <class MyDevice>
 void LookupParameterStorage::accumulate_grad_dev(MyDevice & dev, unsigned index, const Tensor& d) {
   non_zero_grads.insert(index);
-  grads[index].tvec().device(*dev.edevice) += d.tvec();
+  tvec(grads[index]).device(*dev.edevice) += tvec(d);
 }
 #ifdef __CUDACC__
 template void LookupParameterStorage::accumulate_grad_dev<Device_GPU>(Device_GPU & dev, unsigned index, const Tensor& d);
@@ -733,7 +736,7 @@ void LookupParameterStorage::accumulate_grads_dev(MyDevice & dev, unsigned n, co
   Tensor gt(dim, g, all_grads.device, all_grads.mem_pool);
   for (unsigned i = 0; i < n; ++i) {
     non_zero_grads.insert(ids_host[i]);
-    grads[ids_host[i]].tvec().device(*dev.edevice) += gt.tvec();
+    tvec(grads[ids_host[i]]).device(*dev.edevice) += tvec(gt);
     gt.v += gsize;
   }
 #endif
@@ -758,7 +761,7 @@ void LookupParameterStorage::accumulate_grads(unsigned n, const unsigned* ids_ho
 
 template <class MyDevice>
 void LookupParameterStorage::scale_parameters_dev(MyDevice & dev, float a) {
-  all_values.tvec().device(*dev.edevice) = all_values.tvec() * a;
+  tvec(all_values).device(*dev.edevice) = tvec(all_values) * a;
 }
 #ifdef __CUDACC__
 template void LookupParameterStorage::scale_parameters_dev<Device_GPU>(Device_GPU & dev, float a);
@@ -780,7 +783,7 @@ void LookupParameterStorage::scale_parameters(float a) {
 
 template <class MyDevice>
 void LookupParameterStorage::scale_gradient_dev(MyDevice & dev, float a) {
-  all_grads.tvec().device(*dev.edevice) = all_grads.tvec() * a;
+  tvec(all_grads).device(*dev.edevice) = tvec(all_grads) * a;
 }
 #ifdef __CUDACC__
 template void LookupParameterStorage::scale_gradient_dev<Device_GPU>(Device_GPU & dev, float a);
@@ -819,7 +822,7 @@ float ParameterCollectionStorage::gradient_l2_norm_dev(MyDevice &dev) const {
       dev_k = params[k1]->device;
       ++k1;
     } else if (lookup_params.size() && all_params[pi] == lookup_params[k2]) {
-      dev_k = lookup_params[k2]->device; 
+      dev_k = lookup_params[k2]->device;
       ++k2;
     } else {
       DYNET_RUNTIME_ERR("Incorrect device type");
@@ -840,7 +843,7 @@ float ParameterCollectionStorage::gradient_l2_norm_dev(MyDevice &dev) const {
   }
   Tensor scratch_t({(unsigned int)all_params.size()}, gradient_norm_scratch, &dev, DeviceMempool::NONE);
   Tensor sum_t({1}, gradient_norm_scratch + pi, &dev, DeviceMempool::NONE);
-  sum_t.t<0>().device(*dev.edevice) = scratch_t.t<1>().sum().sqrt();
+  t<0>(sum_t).device(*dev.edevice) = t<1>(scratch_t).sum().sqrt();
   return gradient_norm_scratch[pi];
 }
 

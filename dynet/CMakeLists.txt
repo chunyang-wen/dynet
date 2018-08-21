@@ -23,6 +23,7 @@ set(dynet_library_SRCS
     model.cc
     nodes-activations.cc
     nodes-affinetransform.cc
+    nodes-argmax.cc
     nodes-arith-const.cc
     nodes-arith-cwise.cc
     nodes-arith-sum.cc
@@ -43,6 +44,7 @@ set(dynet_library_SRCS
     nodes-maxpooling2d.cc
     nodes-minmax.cc
     nodes-moments.cc
+    nodes-cumulative.cc
     nodes-normalization.cc
     nodes-norms.cc
     nodes-pickneglogsoftmax.cc
@@ -70,84 +72,91 @@ endif()
 
 # Headers:
 set(dynet_library_HDRS
-    aligned-mem-pool.h
-    c2w.h
-    cfsm-builder.h
-    cuda.h
-    cudnn-ops.h
-    deep-lstm.h
-    devices.h
-    dict.h
-    dim.h
-    dynet-helper.h
-    dynet.h
-    except.h
-    exec.h
-    expr.h
-    fast-lstm.h
-    functors.h
-    globals.h
-    gpu-kernels.h
-    gpu-ops.h
-    grad-check.h
-    graph.h
-    gru.h
-    hsm-builder.h
-    init.h
-    io.h
-    lstm.h
-    matrix-multiply.h
-    mem.h
-    model.h
-    nodes-activations.h
-    nodes-affinetransform.h
-    nodes-arith-const.h
-    nodes-arith-cwise.h
-    nodes-arith-sum.h
-    nodes-arith-unary.h
-    nodes-concat.h
-    nodes-const.h
-    nodes-contract.h
-    nodes-conv.h
-    nodes-conv2d.h
-    nodes-dropout.h
-    nodes-flow.h
-    nodes-hinge.h
-    nodes-linalg.h
-    nodes-logsumexp.h
-    nodes-losses.h
-    nodes-lstm.h
-    nodes-macros.h
-    nodes-matrixmultiply.h
-    nodes-maxpooling2d.h
-    nodes-minmax.h
-    nodes-moments.h
-    nodes-normalization.h
-    nodes-norms.h
-    nodes-pickneglogsoftmax.h
-    nodes-random.h
-    nodes-select.h
-    nodes-similarities.h
-    nodes-softmaxes.h
-    nodes-to-device.h
-    nodes-trig.h
-    nodes.h
-    param-init.h
-    param-nodes.h
-    pretrain.h
-    rnn-state-machine.h
-    rnn.h
-    saxe-init.h
-    shadow-params.h
-    sig.h
-    simd-functors.h
-    str-util.h
-    tensor.h
-    timing.h
-    training.h
-    treelstm.h
-    virtual-cudnn.h
-    weight-decay.h
+aligned-mem-pool.h
+c2w.h
+cfsm-builder.h
+cuda.h
+cudnn-ops.h
+deep-lstm.h
+devices.h
+device-structs.h
+dict.h
+dim.h
+dynet.h
+dynet-helper.h
+except.h
+exec.h
+expr.h
+fast-lstm.h
+functors.h
+globals.h
+gpu-kernels.h
+gpu-ops.h
+grad-check.h
+graph.h
+gru.h
+hsm-builder.h
+index-tensor.h
+init.h
+io.h
+lstm.h
+matrix-multiply.h
+mem.h
+model.h
+mp.h
+nodes-activations.h
+nodes-affinetransform.h
+nodes-argmax.h
+nodes-arith-const.h
+nodes-arith-cwise.h
+nodes-arith-sum.h
+nodes-arith-unary.h
+nodes-concat.h
+nodes-const.h
+nodes-contract.h
+nodes-conv2d.h
+nodes-conv.h
+nodes-cumulative.h
+nodes-def-macros.h
+nodes-dropout.h
+nodes-flow.h
+nodes.h
+nodes-hinge.h
+nodes-impl-macros.h
+nodes-linalg.h
+nodes-logsumexp.h
+nodes-losses.h
+nodes-lstm.h
+nodes-matrixmultiply.h
+nodes-maxpooling2d.h
+nodes-minmax.h
+nodes-moments.h
+nodes-normalization.h
+nodes-norms.h
+nodes-pickneglogsoftmax.h
+nodes-random.h
+nodes-select.h
+nodes-similarities.h
+nodes-softmaxes.h
+nodes-to-device.h
+nodes-trig.h
+param-init.h
+param-nodes.h
+pretrain.h
+rnn.h
+rnn-state-machine.h
+saxe-init.h
+shadow-params.h
+sig.h
+simd-functors.h
+str-util.h
+tensor-eigen.h
+tensor.h
+timing.h
+training.h
+treelstm.h
+virtual-cudnn.h
+weight-decay.h
 )
 if(ENABLE_BOOST)
   list(APPEND dynet_library_HDRS mp.h)
@@ -156,6 +165,7 @@ endif()
 set(dynet_gpu_mergeable_SRCS
     nodes-activations
     nodes-affinetransform
+    nodes-argmax
     nodes-arith-const
     nodes-arith-cwise
     nodes-arith-sum
@@ -176,6 +186,7 @@ set(dynet_gpu_mergeable_SRCS
     nodes-maxpooling2d
     nodes-minmax
     nodes-moments
+    nodes-cumulative
     nodes-normalization
     nodes-norms
     nodes-pickneglogsoftmax
@@ -244,11 +255,26 @@ if(WITH_CUDA_BACKEND)
 
   # cuda flags
   set(CUDA_SEPARABLE_COMPILATION ON)
-  list(APPEND CUDA_NVCC_FLAGS "-gencode;arch=compute_30,code=sm_30;-gencode;arch=compute_35,code=sm_35;-gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_52,code=sm_52;-gencode;arch=compute_52,code=compute_52;-std=c++11;-DVERBOSE;-DEIGEN_USE_GPU;-DHAVE_CUDA;")
+
+  if(CUDA_ARCH)
+    list(APPEND CUDA_NVCC_FLAGS "-arch=sm_${CUDA_ARCH};-std=c++11;-DVERBOSE;-DEIGEN_USE_GPU;-DHAVE_CUDA;-D_FORCE_INLINES")
+  else()
+    list(APPEND CUDA_NVCC_FLAGS "-gencode;arch=compute_30,code=sm_30;-gencode;arch=compute_35,code=sm_35;-gencode;arch=compute_37,code=sm_37;-gencode;arch=compute_50,code=sm_50;-gencode;arch=compute_52,code=sm_52;-gencode;arch=compute_52,code=compute_52;-std=c++11;-DVERBOSE;-DEIGEN_USE_GPU;-DHAVE_CUDA;-D_FORCE_INLINES")
+  endif()
   if(CUDNN_FOUND)
     list(APPEND CUDA_NVCC_FLAGS "-DHAVE_CUDNN")
   endif()
-  list(APPEND CUDA_NVCC_FLAGS "-O2")
+  if(CMAKE_COMPILER_IS_GNUCXX)
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 4.9 OR CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 4.9)
+      # gcc 4.9 or later versions raise SEGV due to the optimization problem.
+      # Use -O1 instead for now.
+      list(APPEND CUDA_NVCC_FLAGS "-O1")
+    else()
+      list(APPEND CUDA_NVCC_FLAGS "-O2")
+    endif()
+  else()
+    list(APPEND CUDA_NVCC_FLAGS "-O2")
+  endif()
   if(MSVC)
     # If MSVC, we need the boost flag because nvcc doesn't properly parse part of the boost template definitions
     list(APPEND CUDA_NVCC_FLAGS "-DBOOST_NO_CXX11_ALLOCATOR")

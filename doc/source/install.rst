@@ -35,7 +35,7 @@ following command:
 
 ::
 
-    hg clone https://bitbucket.org/eigen/eigen/ -r 699b659
+    hg clone https://bitbucket.org/eigen/eigen/ -r b2e267d
     
 The `-r NUM` specified a revision number that is known to work.  Adventurous
 users can remove it and use the very latest version, at the risk of the code
@@ -116,15 +116,18 @@ the same as with the CPU backend case.
 
     -L/path/to/dynet/build/dynet -ldynet
 
+If you know the CUDA architecture supported by your GPU (e.g. by referencing
+`this page <http://arnon.dk/matching-sm-architectures-arch-and-gencode-for-various-nvidia-cards/>`__)
+you can speed compilation significantly by adding ``-DCUDA_ARCH=XXX`` where
+``XXX`` is your architecture number.
 
 cuDNN support
 ~~~~~~~~~~~~~
 
-When running DyNet with CUDA on GPUs, some of DyNet's functionalities
-(e.g. conv2d) will depend on the `NVIDIA cuDNN libraries <https://developer.nvidia.com/cudnn>`__.
-CMake will automatically detect cuDNN in the suggested installation path 
-by NVIDIA (i.e. ``/usr/local/cuda``) and enable those functionalities 
-if detected.
+When running DyNet with CUDA on GPUs, some of DyNet's functionality
+(e.g. conv2d) depends on the `NVIDIA cuDNN libraries <https://developer.nvidia.com/cudnn>`__.
+CMake will automatically detect cuDNN in the CUDA installation path 
+(i.e. ``/usr/local/cuda``) and enable it if detected.
 
 If CMake is unable to find cuDNN automatically, try setting `CUDNN_ROOT`, such as
 
@@ -132,12 +135,9 @@ If CMake is unable to find cuDNN automatically, try setting `CUDNN_ROOT`, such a
 
     -DCUDNN_ROOT="/path/to/CUDNN"
 
-. However, if you don't have cuDNN installed, those dependend functionalities 
+However, if you don't have cuDNN installed, the dependent functionality
 will be automatically disabled and an error will be throwed during runtime if you try
 to use them.
-
-Currently, DyNet supports cuDNN v5.1, future versions will also be supported soon.
-
 
 MKL support
 ~~~~~~~~~~~

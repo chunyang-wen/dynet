@@ -5,6 +5,7 @@ from cython.operator cimport dereference as deref
 from libc.stdlib cimport malloc, free
 from libcpp.memory cimport shared_ptr
 import numpy as np
+import cython
 
 # python3 pickle already uses the c implementaion 
 try:
@@ -71,12 +72,12 @@ cdef class DynetParams: # {{{
         """Set parameters from config object:
         
         Attributes of conf object:
-            mem, seed, autobatch, autobatch_debug, weight_decay, shared_params, requested_gpus, gpu_mask
+            mem, seed, autobatch, profiling, weight_decay, shared_params, requested_gpus, gpu_mask
         """
         self.cparams.mem_descriptor = str(conf["mem"]).encode()
         self.cparams.random_seed=conf["seed"]
         self.cparams.autobatch = conf["autobatch"]
-        self.cparams.autobatch_debug = conf["autobatch_debug"]
+        self.cparams.profiling = conf["profiling"]
         self.cparams.weight_decay = conf["weight_decay"]
         self.cparams.shared_parameters = conf["shared_params"]
         if conf["requested_gpus"] >= 1:
@@ -97,25 +98,37 @@ cdef class DynetParams: # {{{
             shared_parameters([type]): [description] (default: None)
         """
         cpu_use = False
-        if '--dynet-gpu' in sys.argv:
-            sys.argv.remove('--dynet-gpu')
-            sys.argv.append('--dynet-gpus')
-            sys.argv.append('1')
-        elif not ('--dynet-gpus' in sys.argv or
-                  '--dynet-devices' in sys.argv or
-                  '--dynet-viz' in sys.argv):
+        sys_argv = list(sys.argv)
+        truncated_args = []
+        for arg in sys_argv:
+          pos = arg.find('=')
+          if pos == -1:
+            truncated_args.append(arg)
+          else:
+            truncated_args.append(arg[:pos])
+        if '--dynet-gpu' in sys_argv:
+            sys_argv.remove('--dynet-gpu')
+            sys_argv.append('--dynet-gpus=1')
+        elif '--dynet_gpu' in sys_argv:
+            sys_argv.remove('--dynet_gpu')
+            sys_argv.append('--dynet-gpus=1')
+        elif not ('--dynet-gpus' in truncated_args or
+                  '--dynet_gpus' in truncated_args or
+                  '--dynet-devices' in truncated_args or
+                  '--dynet_devices' in truncated_args or
+                  '--dynet-viz' in truncated_args or
+                  '--dynet_viz' in truncated_args):
             cpu_use = True
 
-        argv_count = int(len(sys.argv))
-        cdef int argc = argv_count + 2 if cpu_use else argv_count
+        argv_count = int(len(sys_argv))
+        cdef int argc = argv_count + 1 if cpu_use else argv_count
         cdef char** c_argv
         c_argv = <char**>malloc(sizeof(char*) * argc) # TODO check failure?
-        args = [bytearray(x, encoding="utf-8") for x in sys.argv]
+        args = [bytearray(x, encoding="utf-8") for x in sys_argv]
         for idx, s in enumerate(args):
             c_argv[idx] = s
         if cpu_use:
-            c_argv[argc-2] = '--dynet-devices' 
-            c_argv[argc-1] = 'CPU'
+            c_argv[argc-1] = '--dynet-devices=CPU'
 
         if shared_parameters is None:
             self.cparams = dynet.extract_dynet_params(argc,c_argv, 0)
@@ -160,16 +173,13 @@ cdef class DynetParams: # {{{
         else:
             self.cparams.autobatch = 0
 
-    cpdef set_autobatch_debug(self, bool autobatch_debug):
+    cpdef set_profiling(self, int profiling):
         """Activate autobatching debug
         
         Args:
-            autobatch(bool): Set to :code:`True` to activate autobatching debug
+            profiling(int): Set to a value > 0 to activate profiling
         """
-        if autobatch_debug:
-            self.cparams.autobatch_debug = 1
-        else:
-            self.cparams.autobatch_debug = 0
+        self.cparams.profiling = profiling
 
     cpdef set_weight_decay(self, float weight_decay):
         """Set weight decay parameter
@@ -236,6 +246,15 @@ def init_from_params(DynetParams params):
         params(DynetParams): dynet parameters
     """
     params.init()
+
+cpdef reset_random_seed(seed):
+    """Resets the random seed and the random number generator
+    
+    Args:
+        seed(int): The new random seed
+    """
+    c_reset_rng(seed)
+
 # }}}
 
 # Dimensions {{{
@@ -313,12 +332,12 @@ cdef _load_one(datafname, fh, model):
         obj.param_collection().populate(datafname, name)
         return obj
 
-cpdef save(basename, lst):
+cpdef save(basename, objects):
     """Saves a list of parameters, lookup parameters and builder objects to disk.
 
     Args:
         basename (string): The base-name of the files to save. Two files will be created: `basename.data` and `basename.meta`.
-        lst      (list):  A list of objects to save (see below).
+        objects  (iterable):  An iterable of objects to save (see below).
 
 
     Example:
@@ -338,7 +357,7 @@ cpdef save(basename, lst):
 
     
     What can be saved:
-        Each object in `lst` must be one of the following:
+        Each object in `objects` must be one of the following:
         
         (1) Parameter
         (2) LookupParameter
@@ -358,24 +377,23 @@ cpdef save(basename, lst):
         behind the scenes:
         
         - for each item, we write to `.meta`:
-            if its a Parameters/ParameterCollection: 
+            if it is a Parameters/ParameterCollection:
                 its type and full name.
-            if its a builder:
+            if it is a builder:
                 its class, its spec, the full name of its parameters collection.
         - the associated parameters/sub-collection is then saved to `.data`
     """
     open(basename+".data","w").close() # delete current
-    fh = open(basename+".meta","wb")
-    for item in lst:
-        _save_one(basename+".data", fh, item)
-    fh.close()
+    with open(basename+".meta","wb") as fh:
+        for item in objects:
+            _save_one(basename+".data", fh, item)
 
 cpdef load(basename, params):
     """Loads a list of parameters, lookup parameters and builder objects from disk.
-    The loaded objects are added to the supplied params collection, and returned.
+    The loaded objects are added to the supplied parameter collection, and returned.
 
     Args:
-        basename (string):  The basename to read from. 
+        basename (string):  The basename to read from.
                             This is the same string that was used when saving the objects.
         params   (dynet.ParameterCollection): A ParameterCollection to add the loaded objects to.
 
@@ -398,15 +416,42 @@ cpdef load(basename, params):
         pc = dy.ParameterCollection()
         E2, builder2, W2 = dy.load("model", pc)
     """
-    fh = open(basename+".meta","rb")
-    res = []
-    while True:
-        try:
-            obj = _load_one(basename+".data", fh, params)
-        except EOFError: break
-        res.append(obj)
-    fh.close()
-    return res
+    return list(load_generator(basename, params))
+
+def load_generator(basename, params):
+    """Same as load(), but the parameters are returned as a generator instead of a list.
+    This allows saving memory or even showing a progress bar while loading the parameters.
+
+    Args:
+        basename (string):  The basename to read from.
+                            This is the same string that was used when saving the objects.
+        params   (dynet.ParameterCollection): A ParameterCollection to add the loaded objects to.
+
+    Returns:
+        A generator of parameters, lookup parameters and builder objects, in the same order they
+        were passed to the save function.
+
+
+    Example:
+        import dynet as dy
+        from tqdm import tqdm
+
+        pc = dy.ParameterCollection()
+        W = pc.add_parameters((100,50))
+        E = pc.add_lookup_parameters((1000,50))
+        builder = dy.LSTMBuilder(2, 50, 50, pc)
+
+        dy.save("model", tqdm((E, builder, W), unit="param"))
+
+        # then, when loading:
+        pc = dy.ParameterCollection()
+        E2, builder2, W2 = tqdm(dy.load_generator("model", pc), unit="param")
+    """
+    with open(basename+".meta","rb") as fh:
+        while True:
+            try:
+                yield _load_one(basename+".data", fh, params)
+            except EOFError: break
 # }}}
 
 cdef c_tensor_as_np(CTensor &t):
@@ -440,7 +485,7 @@ cdef class NormalInitializer(PyInitializer):
         mean (number): Mean of the distribution (default: 0)
         var (number): Variance of the distribution (default: 1)
     """
-    def __init__(self, float mean=0, var=1):
+    def __init__(self, float mean=0, float var=1):
         self.initializer = new CParameterInitNormal(mean, var)
 
 cdef class UniformInitializer(PyInitializer):
@@ -497,7 +542,7 @@ cdef class SaxeInitializer(PyInitializer):
         Keyword Arguments:
             scale (number): scale to apply to the orthonormal matrix
     """
-    def __init__(self,scale=1.0):
+    def __init__(self,float scale=1.0):
         self.initializer = new CParameterInitSaxe(scale)
 
 cdef class FromFileInitializer(PyInitializer):
@@ -529,8 +574,319 @@ cdef class NumpyInitializer(PyInitializer):
         return vals
 # }}}
 
+cdef class Expression: #{{{
+    """Expressions are the building block of a Dynet computation graph.
+    
+    Expressions are the main data types being manipulated in a DyNet program. Each expression represents a sub-computation in a computation graph.
+    """
+    #cdef CComputationGraph* cg
+    # cg is a singleton, so there is no need to keep it inside the expression.
+    # not keeping cg() in the expression will preserve memory.
+    # if DYNET comes to support multiple computation graphs, this will need to change.
+    cdef inline ComputationGraph cg(self):
+        return cg()
+    cdef inline CComputationGraph* cgp(self):
+        return cg().thisptr
+
+    cdef VariableIndex vindex
+    cdef int cg_version
+    def __cinit__(self):
+        #self.cg = NULL
+        self.vindex = 0
+    @staticmethod
+    cdef Expression from_cexpr(int cgv, CExpression cexpr):
+        if cexpr.is_stale(): raise ValueError("Attempt to use a stale expression, from a previous Computation Graph.")
+        self = Expression()
+        #self.cg = cexpr.pg
+        self.vindex = cexpr.i
+        self.cg_version = _cg._cg_version
+        return self
+    cdef CExpression c(self):
+        return CExpression(self.cgp(), self.vindex)
+
+    def dim(self):
+        """Dimension of the expression
+
+        Returns a tuple (dims,batch_dim) where dims is the tuple of dimensions of each batch element
+        
+        Returns:
+            tuple: dimension
+        """
+        cdef CDim d;
+        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
+        d=self.c().dim()
+        return c_dim_as_dim(d)
+        # return (d.size(), d.rows(), d.cols(), d.batch_elems())
+
+    def __repr__(self):
+        return str(self)
+    def __str__(self):
+        """Returns a string representation of the expression
+        
+        The format is "expression [expression id]/[computation graph id]"
+        """
+        return "expression %s/%s" % (<int>self.vindex, self.cg_version)
+
+    # __getitem__ and __getslice__ in one for python 3 compatibility
+    def __getitem__(self, index):
+        """Access elements of the expression by rows
+        
+        This supports slices as well.
+        Example usage :
+
+            x = dy.inputTensor(np.arange(9).reshape(3,3))
+            # x = [[1, 2, 3],
+            #      [4, 5, 6],
+            #      [7, 8, 9]] 
+            y = x[1]
+            # y = [4, 5, 6]
+            z = x[0:1] 
+            # z = [[1, 2, 3],
+            #      [4, 5, 6]] 
+        
+        Args:
+            index(int,slice): Slice or index
+        
+        Returns:
+            Expression: Slice of the expression
+        
+        Raises:
+            IndexError: If the indices are too large
+            ValueError: In case of improper slice or if step is used
+        """
+        assert isinstance(index, (int, slice, tuple)), "Expression key must be int or slice or tuple of slices: %s" % index
+        cdef int rows = self.c().dim().rows()
+        cdef int i, j
+        if isinstance(index, int):
+            i = index
+            if i > rows - 1:
+                raise IndexError("Index too large: %d > %d" % (i, rows - 1))
+            if i < -rows:
+                raise IndexError("Index too small: %d < %d" % (i, -rows))
+            if i < 0:
+                i += rows
+            return pick(self, i)
+        elif isinstance(index, slice):
+            return strided_select(self, [index.step] if index.step is not None else [], 
+                                        [index.start] if index.start is not None else [],
+                                        [index.stop] if index.stop is not None else [])
+        elif isinstance(index, tuple):
+            steps = []
+            for slice_i in index:
+              if slice_i.step is None:
+                steps.append(1)
+              else:
+                if slice_i.step <= 0: raise IndexError("steps must be positive, got:", slice_i.step)
+                steps.append(slice_i.step)
+            starts = []
+            for slice_i in index:
+              if slice_i.start is None:
+                starts.append(0)
+              else:
+                starts.append(slice_i.start)
+            stops = []
+            for i, slice_i in enumerate(index):
+              if slice_i.stop is None:
+                if i == len(self.dim()[0]):
+                  stops.append(self.dim()[1])
+                else:
+                  stops.append(self.dim()[0][i])
+              else:
+                stops.append(slice_i.stop)
+            return strided_select(self, steps, starts, stops)
+
+    cpdef scalar_value(self, bool recalculate=False):
+        """Returns value of an expression as a scalar
+        
+        This only works if the expression is a scalar
+        
+        Keyword Args:
+            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
+        
+        Returns:
+            float: Scalar value of the expression
+        """
+        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
+        if recalculate: self.cg().forward(self.vindex) # TODO: make recalculate run on the entire graph, not only up to here?
+        return c_as_scalar(self.cgp().get_value(self.vindex))
+
+    cpdef vec_value(self, bool recalculate=False):
+        """Returns the value of the expression as a vector
+        
+        In case of a multidimensional expression, the values are flattened according to a column major ordering
+        
+        Keyword Args:
+            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
+        
+        Returns:
+            list: Array of values
+        """
+        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
+        if recalculate: self.cg().forward(self.vindex)
+        return c_as_vector(self.cgp().get_value(self.vindex))
+
+    cpdef npvalue(self, bool recalculate=False):
+        """Returns the value of the expression as a numpy array
+        
+        The last dimension is the batch size (if it's > 1)
+        
+        Keyword Args:
+            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
+        
+        Returns:
+            np.ndarray: numpy array of values
+        """
+        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
+        cdef CTensor t
+        cdef CDim dim
+        if recalculate: self.cg().forward(self.vindex)
+        t = self.cgp().get_value(self.vindex)
+        dim = t.d
+        arr = np.array(c_tensor_as_np(t))
+        return arr
+
+    cpdef tensor_value(self, bool recalculate=False):
+        """Returns the value of the expression as a Tensor.
+
+        This is useful if you want to use the value for other on-device calculations
+        that are not part of the computation graph, i.e. using argmax.
+        
+        Keyword Args:
+            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
+        
+        Returns:
+            Tensor: a dynet Tensor object.
+        """
+        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
+        cdef CTensor t
+        cdef CDim dim
+        if recalculate: self.cg().forward(self.vindex)
+        t = self.cgp().get_value(self.vindex)
+        return Tensor.wrap_ctensor(t)
+
+    cpdef value(self, bool recalculate=False):
+        """Gets the value of the expression in the most relevant format
+        
+        this returns the same thing as :code:`scalar_value`, :code:`vec_value`, :code:`npvalue` depending on whether the number of dimensions of the expression is 0, 1 or 2+
+        
+        Keyword Args:
+            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
+        
+        Returns:
+            float, list, np.ndarray: Value of the expression
+        """
+        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
+        cdef CTensor t
+        if recalculate: self.cg().forward(self.vindex)
+        t = self.cgp().get_value(self.vindex)
+        if t.d.ndims() >= 2:
+            return self.npvalue()
+        vec = self.vec_value()
+        if len(vec) == 1: return vec[0]
+        return vec
+
+    cpdef gradient(self):
+        """Returns the value of the expression as a numpy array
+        
+        The last dimension is the batch size (if it's > 1).
+
+        Make sure to call :code:`backward` on a downstream expression before calling this.
+
+        If the Expression is a constant expression (meaning it's not a function of a parameter), dynet won't compute it's gradient for the sake of efficiency. You need to manually force the gradient computation by adding the agument :code:`full=True` to :code:`backward`
+        
+        Returns:
+            np.ndarray: numpy array of values
+        """
+        cdef CTensor t
+        cdef CDim dim
+        t = self.c().gradient()
+        dim = t.d
+        arr = c_tensor_as_np(t)
+        return arr
+
+    # TODO this runs incremental forward on the entire graph, may not be optimal in terms of efficiency.
+    cpdef forward(self, bool recalculate=False):
+        """This runs incremental forward on the entire graph
+        
+        May not be optimal in terms of efficiency.
+        Prefer :code:`values`
+        
+        Keyword Args:
+            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
+        """
+        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
+        if recalculate: self.cg().forward(self.vindex)
+        else: self.cg().inc_forward(self.vindex)
+
+    cpdef backward(self, bool full=False):
+        """Run the backward pass based on this expression
+        
+        The parameter :code:`full` specifies whether the gradients should be computed for all nodes (:code:`True`) or only non-constant nodes (:code:`False`).
+        
+        By default, a node is constant unless
+        
+        1. it is a parameter node
+        2. it depends on a non-constant node
+        
+        Thus, functions of constants and inputs are considered as constants.
+        
+        Turn :code:`full` on if you want to retrieve gradients w.r.t. inputs for instance. By default this is turned off, so that the backward pass ignores nodes which have no influence on gradients w.r.t. parameters for efficiency.
+
+        Args:
+            full (bool): Whether to compute all gradients (including with respect to constant nodes).
+
+        """
+        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
+        self.cgp().backward(self.vindex, full)
+
+    def __add__(self, other):
+        if isinstance(self, Expression) and isinstance(other, Expression):
+            return _add(self,other)
+        elif isinstance(self, (int,float)):
+            return _cadd(other, self)
+        elif isinstance(other, (int,float)):
+            return _cadd(self, other)
+        else: raise NotImplementedError()
+    def __mul__(self, other):
+        if isinstance(self, Expression) and isinstance(other, Expression):
+            return _mul(self,other)
+        elif isinstance(self, (int,float)):
+            return _cmul(other, self)
+        elif isinstance(other, (int,float)):
+            return _cmul(self, other)
+        else: raise NotImplementedError()
+    def __div__(self, other):
+        if isinstance(self, Expression) and isinstance(other, Expression):
+            return _div(self, other)
+        elif isinstance(self, (int,float)):
+            return _cdiv(self, other)
+        elif isinstance(other, (int,float)):
+            return _cdiv(self, other)
+        else: raise NotImplementedError()
+    def __truediv__(self, other):
+        if isinstance(self, Expression) and isinstance(other, (int,float)):
+            return _cdiv(self, other)
+        else: raise NotImplementedError()  
+    def __neg__(self):        return _neg(self)
+    def __sub__(self, other):
+        if isinstance(self,Expression) and isinstance(other,Expression):
+            return self+(-other)
+        elif isinstance(self,(int,float)) and isinstance(other,Expression):
+            return _scalarsub(self, other)
+        elif isinstance(self,Expression) and isinstance(other,(int, float)):
+            return _neg(_scalarsub(other, self))
+        else: raise NotImplementedError()
+    def __pow__(self, other, _):
+        if isinstance(self, Expression) and isinstance(other, Expression):
+            return pow(self, other)
+        elif isinstance(self, Expression) and isinstance(other, (int, float)):
+            return pow(self, scalarInput(other))
+        else: raise NotImplementedError()
+#}}}
+
+
 # {{{ ParameterCollection / Parameters 
-cdef class Parameters: # {{{
+cdef class Parameters(Expression): # {{{
     """Parameters class
     
     Parameters are things that are optimized. in contrast to a system like Torch where computational modules may have their own parameters, in DyNet parameters are just parameters.
@@ -542,6 +898,8 @@ cdef class Parameters: # {{{
     cdef Expression _const_expr
     def __cinit__(self):
         self._version = -1
+
+    # All creations MUST go through wrap_ptr
     @staticmethod
     cdef wrap_ptr(CParameters ptr):
         self = Parameters()
@@ -574,7 +932,7 @@ cdef class Parameters: # {{{
         del saver
 
     # TODO docs
-    def populate_from_textfile(self, string fname, string key=""):
+    def populate_from_textfile(self, fname, key=""):
         cdef CTextFileLoader *loader
         cdef string _fname = <string> fname.encode("utf8")
         cdef string _key = <string> key.encode("utf8")
@@ -625,7 +983,8 @@ cdef class Parameters: # {{{
             arr = np.asarray(arr)
         shape = arr.shape
         if self.shape() != shape:
-            raise ValueError("Shape of values and parameter don't match in Parameters.set_value")
+            raise ValueError("Shape of values and parameter don't match in Parameters.set_value: "
+                             "%s != %s" % (shape, self.shape()))
         arr = arr.flatten(order='F')
         self.thisptr.set_value(arr)
 
@@ -676,13 +1035,9 @@ cdef class Parameters: # {{{
         """
         return self.thisptr.get_fullname().decode("utf8")
 
-    cpdef Expression expr(self, bool update=True):
+    cdef Expression _iexpr(self, bool update=True):
         """Returns the parameter as an expression
 
-        This is the same as calling
-
-            dy.parameter(param)
-        
         Args:
             update(bool): If this is set to False, the parameter won't be updated during the backward pass
         Returns:
@@ -699,9 +1054,60 @@ cdef class Parameters: # {{{
                 self._const_expr = Expression.from_cexpr(_cg.version(), c_const_parameter(_cg.thisptr[0], self.thisptr))
             return self._const_expr
 
+    # for backward compatibility.
+    # deprecate.
+    cpdef expr(self, update=False):
+        """Returns the parameter as an expression.
+
+        This is useful if you want to return a constant version of the parameter by setting :code:`update=False`. More precisely,
+
+        .. code-block:: python
+
+            W.expr(update)
+
+        Will return the same thing as
+        
+        .. code-block:: python
+
+            W if update else dy.const_parameter(W)
+        
+        Args:
+            update(bool): If this is set to False, the parameter won't be updated during the backward pass
+        Returns:
+            Expression: Expression of the parameter
+        """
+        return self._iexpr(update)
+
+    # needed for Expression
+    cdef CExpression c(self):
+        if cg_version() != self._version:
+            self._version = cg_version()
+            self._expr = Expression.from_cexpr(_cg.version(), c_parameter(_cg.thisptr[0], self.thisptr))
+        return self._expr.c()
+
+    def dim(self):
+        return self._iexpr().dim()
+
+    def __repr__(self):
+        return str(self)
+    def __str__(self):
+        return "Parameter %s" % self.name()
+
+    def __getitem__(self, index):
+        return self._iexpr().__getitem__(index)
+
+    cpdef scalar_value(self, bool recalculate=False): return self._iexpr().scalar_value(recalculate)
+    cpdef vec_value(self, bool recalculate=False):    return self._iexpr().vec_value(recalculate)
+    cpdef npvalue(self, bool recalculate=False):      return self._iexpr().npvalue(recalculate)
+    cpdef tensor_value(self, bool recalculate=False): return self._iexpr().tensor_value(recalculate)
+    cpdef value(self, bool recalculate=False):        return self._iexpr().value(recalculate)
+    cpdef gradient(self):                             return self._iexpr().gradient()
+    cpdef forward(self, bool recalculate=False):      return self._iexpr().forward(recalculate)
+    cpdef backward(self, bool full=False):            return self._iexpr().backward(full)
+
 # Parameters }}}
 
-cdef class LookupParameters: # {{{
+cdef class LookupParameters(Expression): # {{{
     """LookupParameters represents a table of parameters.
 
     They are used to embed a set of discrete objects (e.g. word embeddings). These are sparsely updated.
@@ -787,6 +1193,11 @@ cdef class LookupParameters: # {{{
         rotated_shape = tuple([shape[-1]] + list(shape[:-1]))
         return rotated_shape
 
+    def __len__(self):
+        """Returns the number of items embedded"""
+        shape = c_dim_as_shape(self.thisptr.get_storage().all_dim)
+        return shape[-1]
+
     def __getitem__(self, int i):
         """
         Same as :code:`dynet.lookup`
@@ -815,7 +1226,7 @@ cdef class LookupParameters: # {{{
         """
         self.thisptr.initialize(i, row)
 
-    cpdef row_as_array(self, row):
+    cpdef row_as_array(self, int row):
         """Return row as a numpy array.
         
         Args:
@@ -914,7 +1325,7 @@ cdef class LookupParameters: # {{{
         """
         self.thisptr.scale_gradient(s)
         
-    cpdef Expression expr(self,bool update=True):
+    cdef Expression _iexpr(self,bool update=True):
         """Returns an expression for the whole parameter
 
         Same as :code:`dynet.parameter`
@@ -932,6 +1343,10 @@ cdef class LookupParameters: # {{{
                 self._expr = Expression.from_cexpr(_cg.version(), c_const_parameter(_cg.thisptr[0], self.thisptr))
         return self._expr
 
+    # for backward compatibility.
+    # deprecate.
+    cpdef expr(self): return self
+
     cpdef zero(self):
         """Set all values to zero
         """
@@ -945,6 +1360,30 @@ cdef class LookupParameters: # {{{
         Return the full name of this lookup parameter.
         """
         return self.thisptr.get_fullname().decode("utf8")
+
+    # needed for Expression
+    cdef CExpression c(self):
+        if cg_version() != self._version:
+            self._version = cg_version()
+            self._expr = Expression.from_cexpr(_cg.version(), c_parameter(_cg.thisptr[0], self.thisptr))
+        return self._expr.c()
+
+    def dim(self):
+        return self._iexpr().dim()
+
+    def __repr__(self):
+        return str(self)
+    def __str__(self):
+        return "LookupParameter %s" % self.name()
+
+    cpdef scalar_value(self, bool recalculate=False): raise Exception("scalar_value not applicable for LookupParameters.")
+    cpdef vec_value(self, bool recalculate=False):    return self._iexpr().vec_value(recalculate)
+    cpdef npvalue(self, bool recalculate=False):      return self._iexpr().npvalue(recalculate)
+    cpdef tensor_value(self, bool recalculate=False): return self._iexpr().tensor_value(recalculate)
+    cpdef value(self, bool recalculate=False):        return self._iexpr().value(recalculate)
+    cpdef gradient(self):                             return self._iexpr().gradient()
+    cpdef forward(self, bool recalculate=False):      return self._iexpr().forward(recalculate)
+    cpdef backward(self, bool full=False):            return self._iexpr().backward(full)
 # }}}
 
 cdef class ParameterCollection: # {{{
@@ -1033,7 +1472,7 @@ cdef class ParameterCollection: # {{{
         cdef string _fname = <string> fname.encode("utf8")
         cdef string _key = <string> key.encode("utf8")
         loader = new CTextFileLoader(_fname)
-        p = Parameters.wrap_ptr(loader.load_param(self.thisptr, _key))
+        cdef Parameters p = Parameters.wrap_ptr(loader.load_param(self.thisptr, _key))
         del loader
         return p
 
@@ -1135,7 +1574,7 @@ cdef class ParameterCollection: # {{{
         """
         vocab_size = array.shape[0]
         emb_dim = array.shape[1:]
-        init = NumpyInitializer(array.T)
+        init = NumpyInitializer(np.swapaxes(array, 0, array.ndim - 1))
         cdef CDevice* dev
         cdef CLookupParameters p
         cdef string _name = <string> name.encode("utf8")
@@ -1147,28 +1586,71 @@ cdef class ParameterCollection: # {{{
         cdef LookupParameters pp = LookupParameters.wrap_ptr(p)
         return pp
 
-    cpdef add_parameters(self, dim, PyInitializer init=None, name="", device=""):
-        """Add a parameter to the ParameterCollection
+
+    cpdef add_parameters(self, dim, init=None, name="", device="", scale=1.0, mean=0.0, std=1.0):
+        """Add a parameter to the ParameterCollection with a given initializer. There are different ways of specifying an initializer:
+
+        .. code-block:: python
+            
+            p = m.add_parameters((3,5), init=0)                         # Creates 3x5 matrix filled with 0 (or any other float)
+            p = m.add_parameters((3,5), init='uniform', scale=a)        # Creates 3x5 matrix initialized with U([-a,a])
+            p = m.add_parameters((3,5), init='normal', mean=a, std=b)   # Creates 3x5 matrix initialized with N(a, b)
+            p = m.add_parameters((5,5), init='identity')                # Creates 5x5 identity matrix
+            p = m.add_parameters((5,5), init='saxe')                    # Creates 5x5 orthogonal matrix (NOT SUPPORTED YET)
+            p = m.add_parameters((3,5), init='glorot')                  # Creates 3x5 matrix with glorot init
+            p = m.add_parameters((3,5), init='he')                      # Creates 3x5 matrix with he init
+            arr = np.zeros((3, 5)
+            p = m.add_parameters(arr.shape, init=arr)                   # Creates 3x5 matrix from a numpy array
+            p = m.add_parameters((3,5), init=dy.PyInitializer())        # Any parameter initializer
         
         Args:
-            dim (tuple): Shape of the parameter
+            dim (tuple, np.ndarray): Shape of the parameter.
         
         Keyword Arguments:
-            init (dynet.PyInitializer): Initializer (default: GlorotInitializer)
+            init (number, string, dynet.PyInitializer, np.ndarray): Initializer, see description for details (default: GlorotInitializer)
             name (string)             : Optional name for this parameter (default: "")
             device (string)           : Optional device name for this parameter (default: "", default device)
+            scale (number): Scale for uniform initialization
+            mean (number): Mean for normal initialization
+            std (number): Standard deviation for normal initialization
         
         Returns:
             (dynet.Parameters): Created Parameter
         """
-        assert(isinstance(dim,(tuple,int)))
+        assert (isinstance(dim,(list, tuple, int))), 'First argument of add_parameters should be a valid dimension or a numpy array'
+        if isinstance(dim, int):
+            dim = (dim,)
+        if isinstance(init, np.ndarray):
+            return self.parameters_from_numpy(init, name=name, device=device)
         cdef CParameters p
         cdef CParameterInit *initializer
         cdef CDevice *dev
         cdef string _name = <string> name.encode("utf8")
+        cdef PyInitializer pyinit
         if init is None:
-            init = GlorotInitializer()
-        initializer = init.initializer
+            pyinit = GlorotInitializer()
+        else:
+            if isinstance(init, (int, float)):
+                val = init
+                pyinit = ConstInitializer(val)
+            elif isinstance(init, str):
+                if init == 'identity':
+                    pyinit = IdentityInitializer()
+                elif init == 'glorot':
+                    pyinit = GlorotInitializer()
+                elif init == 'he':
+                    pyinit = NormalInitializer(0, 1 / (2 * dim[-1]))
+                elif init == 'uniform':
+                    pyinit = UniformInitializer(scale)
+                elif init == 'normal':
+                    pyinit = NormalInitializer(mean, std*std)
+                else:
+                    raise ValueError('Didn\'t recognize initializer')
+            elif isinstance(init, PyInitializer):
+                pyinit = init
+            else:
+                raise ValueError('Didn\'t recognize initializer')
+        initializer = pyinit.initializer
         if str(device) != "":
             dev = c_str2dev(device)
             p = self.thisptr.add_parameters(Dim(dim), deref(initializer), _name, dev)
@@ -1177,29 +1659,73 @@ cdef class ParameterCollection: # {{{
         cdef Parameters pp = Parameters.wrap_ptr(p)
         return pp
 
-    cpdef add_lookup_parameters(self, dim, PyInitializer init=None, name="", device=""):
-        """Add a lookup parameter to the ParameterCollection
+    cpdef add_lookup_parameters(self, dim, init=None, name="", device="", scale=1.0, mean=0.0, std=1.0):
+        """Add a lookup parameter to the ParameterCollection with a given initializer
+        
+        .. code-block:: python
+            
+            lp = m.add_lookup_parameters((3,5), init=0)                         # Creates 3 vectors of dimension 5 filled with zeros
+            lp = m.add_lookup_parameters((3,5), init='uniform', scale=a)        # Creates 3 vectors of dimension 5 initialized with U([-a,a])
+            lp = m.add_lookup_parameters((3,5), init='normal', mean=a, std=b)   # Creates 3 vectors of dimension 5 initialized with N(a, b)
+            lp = m.add_lookup_parameters((3,5), init='glorot')                  # Creates 3 vectors of dimension 5 with glorot init
+            lp = m.add_lookup_parameters((3,5), init='he')                      # Creates 3 vectors of dimension 5 with he init
+            arr = np.zeros((3, 5))
+            lp = m.add_lookup_parameters(arr.shape, init=arr)                   # Creates 3 vectors of dimension 5 from a numpy array (first dimension is the lookup dimension)
+            lp = m.add_lookup_parameters((3,5), init=dy.PyInitializer())        # Any parameter initializer
         
         Args:
-            dim (tuple): Shape of the parameter. The first dimension is the vocab size
+            dim (tuple, np.ndarray): Shape of the parameter. The first dimension is the lookup dimension (number of records in the lookup table).
         
         Keyword Arguments:
-            init (dynet.PyInitializer): Initializer (default: GlorotInitializer)
+            init (number, string, dynet.PyInitializer, np.ndarray): Initializer, see description for details (default: GlorotInitializer)
             name (string)             : Optional name for this parameter (default: "")
             device (string)           : Optional device name for this parameter (default: "", default device)
+            scale (number)            : Scale for uniform initialization
+            mean (number)             : Mean for normal initialization
+            std (number)              : Standard deviation for normal initialization
         
         Returns:
             (dynet.LookupParameters): Created LookupParameter
         """
-        assert(isinstance(dim, tuple))
-        cdef CDevice *dev
+        assert (isinstance(dim,(tuple, list, int))), 'First argument of add_parameters should be a valid dimension or a numpy array'
+        if isinstance(dim, int):
+            dim = (dim, 1)
+        if isinstance(init, np.ndarray):
+            return self.lookup_parameters_from_numpy(init, name=name, device=device)
         cdef CLookupParameters p
-        cdef int nids = dim[0]
+        cdef CParameterInit *initializer
+        cdef CDevice *dev
         cdef string _name = <string> name.encode("utf8")
+        cdef PyInitializer pyinit
+        cdef int nids = dim[0]
         rest = tuple(dim[1:])
+
         if init is None:
-            init = GlorotInitializer(True)
-        initializer = init.initializer
+            pyinit = GlorotInitializer()
+        else:
+            if isinstance(init, (int, float)):
+                val = init
+                pyinit = ConstInitializer(val)
+            elif isinstance(init, str):
+                if init == 'identity':
+                    pyinit = IdentityInitializer()
+                elif init == 'glorot':
+                    pyinit = GlorotInitializer()
+                elif init == 'he':
+                    pyinit = NormalInitializer(0, 1 / (2 * rest[-1]))
+                elif init == 'uniform':
+                    pyinit = UniformInitializer(scale)
+                elif init == 'normal':
+                    pyinit = NormalInitializer(mean, std*std)
+                else:
+                    raise ValueError('Didn\'t recognize initializer')
+            elif isinstance(init, PyInitializer):
+                if isinstance(init, NumpyInitializer):
+                    raise ValueError('Do not use NumpyInitializer with add_lookup_parameters, use lookup_parameters_from_numpy instead')
+                pyinit = init
+            else:
+                raise ValueError('Didn\'t recognize initializer')
+        initializer = pyinit.initializer
         if str(device) != "":
             dev = c_str2dev(device)
             p = self.thisptr.add_lookup_parameters(nids, Dim(rest), deref(initializer), _name, dev)
@@ -1236,6 +1762,29 @@ cdef class ParameterCollection: # {{{
             (dynet.ParameterCollection) a parameter collection.
         """
         return ParameterCollection.wrap(self.thisptr.add_subcollection((name or "").encode()), self)
+
+    cpdef float get_weight_decay(self):
+        """Get the weight decay lambda value.
+        """
+        return self.thisptr.get_weight_decay_lambda()
+
+    cpdef set_weight_decay(self, float lam):
+        """Set the weight decay coefficient.
+        
+        Args:
+            lam (float): Weight decay coefficient
+        """
+        assert isinstance(lam,float), "Weight decay lambda must be float: %s" % lam
+        self.thisptr.set_weight_decay_lambda(lam)
+
+    cpdef set_weight_decay_lambda(self, lam):
+        """Set the weight decay coefficient. (alias to set_weight_decay)
+
+        Args:
+            lam (float): Weight decay coefficient
+        """
+        assert isinstance(lam,float), "Weight decay lambda must be float: %s" % lam
+        self.thisptr.set_weight_decay_lambda(lam)
 
     cpdef name(self):
         """
@@ -1304,9 +1853,9 @@ cdef class FloatVectorValue:
 cdef int SECRET = 923148
 cdef ComputationGraph _cg = ComputationGraph(SECRET)
 
-def cg_version(): 
+cpdef int cg_version():
     """
-    Varsion of the current computation graph
+    Version of the current computation graph
     """
     return _cg._cg_version
 
@@ -1369,13 +1918,13 @@ cdef class ComputationGraph:
         self._cg_version += 1
         return self
 
-    cpdef version(self): 
+    cpdef int version(self): 
         """
         Same as :code:`dynet.cg_version()`
         """
         return self._cg_version
 
-    def parameters(self, Parameters params):
+    cdef parameters(self, Parameters params):
         """
         Same as :code:`dynet.parameters(params)`
         """
@@ -1563,315 +2112,37 @@ cdef class Tensor: #{{{
             dimension "dim" will be "num", consisting of the appropriate IDs.
         """
         return Tensor.wrap_cindextensor(CTensorTools.categorical_sample_log_prob(self.t, dim, num))
+
+    cpdef topk(self, unsigned dim=0, unsigned num=1):
+        """Calculate the index of the topk value.
+
+        Keyword Args:
+            dim(integer): which dimension to take the topk over
+            num(integer): the number of topk values
+        
+        Returns:
+            A pair of newly allocated Tensor/IndexTensor consisting of values/indexes.
+        """
+        cdef pair[CTensor, CIndexTensor] res = CTensorTools.topk(self.t, dim, num)
+        return (Tensor.wrap_ctensor(res.first), Tensor.wrap_cindextensor(res.second))
 # Tensor }}}
 
 #{{{ Expressions
 cdef ensure_freshness(Expression a):
-    if a.cg_version != _cg.version(): raise ValueError("Attempt to use a stale expression.")
+    if a.cg_version != _cg.version():
+        if type(a) is Parameters or type(a) is LookupParameters:
+            pass
+        else:
+            raise ValueError("Attempt to use a stale expression of type {}".format(type(a)))
 
 cdef _add(Expression a, Expression b): ensure_freshness(b); return Expression.from_cexpr(a.cg_version, c_op_add(a.c(), b.c()))
 cdef _mul(Expression a, Expression b): ensure_freshness(b); return Expression.from_cexpr(a.cg_version, c_op_mul(a.c(), b.c()))
 cdef _neg(Expression a): return Expression.from_cexpr(a.cg_version, c_op_neg(a.c()))
 cdef _scalarsub(float a, Expression b): ensure_freshness(b); return Expression.from_cexpr(b.cg_version, c_op_scalar_sub(a, b.c()))
+cdef _div(Expression a, Expression b): return Expression.from_cexpr(a.cg_version, c_op_div(a.c(), b.c()))
 cdef _cadd(Expression a, float b): return Expression.from_cexpr(a.cg_version, c_op_scalar_add(a.c(), b))
 cdef _cmul(Expression a, float b): return Expression.from_cexpr(a.cg_version, c_op_scalar_mul(a.c(), b))
 cdef _cdiv(Expression a, float b): return Expression.from_cexpr(a.cg_version, c_op_scalar_div(a.c(), b))
-
-cdef class Expression: #{{{
-    """Expressions are the building block of a Dynet computation graph.
-    
-    Expressions are the main data types being manipulated in a DyNet program. Each expression represents a sub-computation in a computation graph.
-    """
-    #cdef CComputationGraph* cg
-    # cg is a singleton, so there is no need to keep it inside the expression.
-    # not keeping cg() in the expression will preserve memory.
-    # if DYNET comes to support multiple computation graphs, this will need to change.
-    cdef inline ComputationGraph cg(self):
-        return cg()
-    cdef inline CComputationGraph* cgp(self):
-        return cg().thisptr
-
-    cdef VariableIndex vindex
-    cdef int cg_version
-    def __cinit__(self):
-        #self.cg = NULL
-        self.vindex = 0
-    @staticmethod
-    cdef Expression from_cexpr(int cgv, CExpression cexpr):
-        if cgv != _cg._cg_version: raise ValueError("Attempt to use a stale expression, from a previous Computation Graph.")
-        self = Expression()
-        #self.cg = cexpr.pg
-        self.vindex = cexpr.i
-        self.cg_version = cgv
-        return self
-    cdef CExpression c(self):
-        return CExpression(self.cgp(), self.vindex)
-
-    def dim(self):
-        """Dimension of the expression
-
-        Returns a tuple (dims,batch_dim) where dims is the tuple of dimensions of each batch element
-        
-        Returns:
-            tuple: dimension
-        """
-        cdef CDim d;
-        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
-        d=self.c().dim()
-        return c_dim_as_dim(d)
-        # return (d.size(), d.rows(), d.cols(), d.batch_elems())
-
-    def __repr__(self):
-        return str(self)
-    def __str__(self):
-        """Returns a string representation of the expression
-        
-        The format is "expression [expression id]/[computation graph id]"
-        """
-        return "expression %s/%s" % (<int>self.vindex, self.cg_version)
-
-    # __getitem__ and __getslice__ in one for python 3 compatibility
-    def __getitem__(self, index):
-        """Access elements of the expression by rows
-        
-        This supports slices as well.
-        Example usage :
-
-            x = dy.inputTensor(np.arange(9).reshape(3,3))
-            # x = [[1, 2, 3],
-            #      [4, 5, 6],
-            #      [7, 8, 9]] 
-            y = x[1]
-            # y = [4, 5, 6]
-            z = x[0:1] 
-            # z = [[1, 2, 3],
-            #      [4, 5, 6]] 
-        
-        Args:
-            index(int,slice): Slice or index
-        
-        Returns:
-            Expression: Slice of the expression
-        
-        Raises:
-            IndexError: If the indices are too large
-            ValueError: In case of improper slice or if step is used
-        """
-        assert isinstance(index, (int, slice))
-        cdef int rows = self.c().dim().rows()
-        cdef int i, j
-        if isinstance(index, int):
-            i = index
-            if i > rows - 1:
-                raise IndexError("Index too large: %d > %d" % (i, rows - 1))
-            if i < -rows:
-                raise IndexError("Index too small: %d < %d" % (i, -rows))
-            if i < 0:
-                i += rows
-            return pick(self, i)
-        else:
-            i = 0
-            j = rows
-            if index.start is not None:
-                i = index.start
-                if i > rows - 1:
-                    raise IndexError("Start index too large: %d > %d" % (i, rows - 1))
-                if i < -rows:
-                    raise IndexError("Start index too small: %d < %d" % (i, -rows))
-                if i < 0:
-                    i += rows
-            if index.stop is not None:
-                j = index.stop
-                if j > rows:
-                    raise IndexError("Stop index too large: %d > %d" % (j, rows))
-                if j < -rows + 1:
-                    raise IndexError("Stop index too small: %d < %d" % (j, -rows + 1))
-                if j < 0:
-                    j += rows
-            if i >= j:
-                raise ValueError("Improper slice: start index must come strictly before stop index")
-            if index.step is not None:
-                raise ValueError("Step sizes not yet supported.")
-            return pick_range(self, i, j)
-
-    cpdef scalar_value(self, recalculate=False):
-        """Returns value of an expression as a scalar
-        
-        This only works if the expression is a scalar
-        
-        Keyword Args:
-            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
-        
-        Returns:
-            float: Scalar value of the expression
-        """
-        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
-        if recalculate: self.cg().forward(self.vindex) # TODO: make recalculate run on the entire graph, not only up to here?
-        return c_as_scalar(self.cgp().get_value(self.vindex))
-
-    cpdef vec_value(self, recalculate=False):
-        """Returns the value of the expression as a vector
-        
-        In case of a multidimensional expression, the values are flattened according to a column major ordering
-        
-        Keyword Args:
-            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
-        
-        Returns:
-            list: Array of values
-        """
-        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
-        if recalculate: self.cg().forward(self.vindex)
-        return c_as_vector(self.cgp().get_value(self.vindex))
-
-    cpdef npvalue(self, recalculate=False):
-        """Returns the value of the expression as a numpy array
-        
-        The last dimension is the batch size (if it's > 1)
-        
-        Keyword Args:
-            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
-        
-        Returns:
-            np.ndarray: numpy array of values
-        """
-        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
-        cdef CTensor t
-        cdef CDim dim
-        if recalculate: self.cg().forward(self.vindex)
-        t = self.cgp().get_value(self.vindex)
-        dim = t.d
-        arr = np.array(c_tensor_as_np(t))
-        return arr
-
-    cpdef tensor_value(self, recalculate=False):
-        """Returns the value of the expression as a Tensor.
-
-        This is useful if you want to use the value for other on-device calculations
-        that are not part of the computation graph, i.e. using argmax.
-        
-        Keyword Args:
-            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
-        
-        Returns:
-            Tensor: a dynet Tensor object.
-        """
-        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
-        cdef CTensor t
-        cdef CDim dim
-        if recalculate: self.cg().forward(self.vindex)
-        t = self.cgp().get_value(self.vindex)
-        return Tensor.wrap_ctensor(t)
-
-    cpdef value(self, recalculate=False):
-        """Gets the value of the expression in the most relevant format
-        
-        this returns the same thing as :code:`scalar_value`, :code:`vec_value`, :code:`npvalue` depending on whether the number of dimensions of the expression is 0, 1 or 2+
-        
-        Keyword Args:
-            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
-        
-        Returns:
-            float, list, np.ndarray: Value of the expression
-        """
-        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
-        cdef CTensor t
-        if recalculate: self.cg().forward(self.vindex)
-        t = self.cgp().get_value(self.vindex)
-        if t.d.ndims() >= 2:
-            return self.npvalue()
-        vec = self.vec_value()
-        if len(vec) == 1: return vec[0]
-        return vec
-
-    cpdef gradient(self):
-        """Returns the value of the expression as a numpy array
-        
-        The last dimension is the batch size (if it's > 1).
-
-        Make sure to call :code:`backward` on a downstream expression before calling this.
-
-        If the Expression is a constant expression (meaning it's not a function of a parameter), dynet won't compute it's gradient for the sake of efficiency. You need to manually force the gradient computation by adding the agument :code:`full=True` to :code:`backward`
-        
-        Returns:
-            np.ndarray: numpy array of values
-        """
-        cdef CTensor t
-        cdef CDim dim
-        t = self.c().gradient()
-        dim = t.d
-        arr = c_tensor_as_np(t)
-        return arr
-
-    # TODO this runs incremental forward on the entire graph, may not be optimal in terms of efficiency.
-    cpdef forward(self, recalculate=False):
-        """This runs incremental forward on the entire graph
-        
-        May not be optimal in terms of efficiency.
-        Prefer :code:`values`
-        
-        Keyword Args:
-            recalculate(bool): Recalculate the computation graph (for static graphs with new inputs) (default: False)
-        """
-        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
-        if recalculate: self.cg().forward(self.vindex)
-        else: self.cg().inc_forward(self.vindex)
-
-    cpdef backward(self, bool full=False):
-        """Run the backward pass based on this expression
-        
-        The parameter :code:`full` specifies whether the gradients should be computed for all nodes (:code:`True`) or only non-constant nodes (:code:`False`).
-        
-        By default, a node is constant unless
-        
-        1. it is a parameter node
-        2. it depends on a non-constant node
-        
-        Thus, functions of constants and inputs are considered as constants.
-        
-        Turn :code:`full` on if you want to retrieve gradients w.r.t. inputs for instance. By default this is turned off, so that the backward pass ignores nodes which have no influence on gradients w.r.t. parameters for efficiency.
-
-        Args:
-            full (bool): Whether to compute all gradients (including with respect to constant nodes).
-
-        """
-        if self.cg_version != _cg._cg_version: raise RuntimeError("Stale Expression (created before renewing the Computation Graph).")
-        self.cgp().backward(self.vindex, full)
-
-    def __add__(self, other):
-        if isinstance(self, Expression) and isinstance(other, Expression):
-            return _add(self,other)
-        elif isinstance(self, (int,float)):
-            return _cadd(other, self)
-        elif isinstance(other, (int,float)):
-            return _cadd(self, other)
-        else: raise NotImplementedError()
-    def __mul__(self, other):
-        if isinstance(self, Expression) and isinstance(other, Expression):
-            return _mul(self,other)
-        elif isinstance(self, (int,float)):
-            return _cmul(other, self)
-        elif isinstance(other, (int,float)):
-            return _cmul(self, other)
-        else: raise NotImplementedError()
-    def __div__(self, other):
-        if isinstance(self, Expression) and isinstance(other, (int,float)):
-            return _cdiv(self, other)
-        else: raise NotImplementedError()
-    def __truediv__(self, other):
-        if isinstance(self, Expression) and isinstance(other, (int,float)):
-            return _cdiv(self, other)
-        else: raise NotImplementedError()  
-    def __neg__(self):        return _neg(self)
-    def __sub__(self, other):
-        if isinstance(self,Expression) and isinstance(other,Expression):
-            return self+(-other)
-        elif isinstance(self,(int,float)) and isinstance(other,Expression):
-            return _scalarsub(self, other)
-        elif isinstance(self,Expression) and isinstance(other,(int, float)):
-            return _neg(_scalarsub(other, self))
-        else: raise NotImplementedError()
-#}}}
 
 cpdef forward(list exps, recalculate=False):
     cdef Expression maxe = exps[0]
@@ -1890,9 +2161,7 @@ cpdef values(list exps, recalculate=False):
     forward(exps, recalculate)
     return [e.value() for e in exps]
 
-#cdef Expression _parameter(ComputationGraph g, Parameters p):
-#    return Expression.from_cexpr(g.version(), c_parameter(g.thisptr[0], p.thisptr))
-
+__deprecation_shown=False
 def parameter(*args):
     """Add parameters to the computation graph.
 
@@ -1909,15 +2178,15 @@ def parameter(*args):
     Raises:
         NotImplementedError: Only works with Parameters and LookupParameters.
     """
-    for p in args:
-      if not (isinstance(p, Parameters) or isinstance(p, LookupParameters)):
-        raise NotImplementedError(
-            "Cannot call parameter() on anything other than Parameters or LookupParameters")
-    if len(args) == 1:
-      return args[0].expr(True)  # True=update parameter
-    else:
-      return tuple(p.expr(True) for p in args)
+    global __deprecation_shown
+    if not __deprecation_shown:
+        print("""The dy.parameter(...) call is now DEPRECATED.
+        There is no longer need to explicitly add parameters to the computation graph.
+        Any used parameter will be added automatically.""")
+    __deprecation_shown=True
 
+    if len(args) == 1: return args[0]
+    return args
 
 def const_parameter(*args):
     """Add constant parameters to the computation graph.
@@ -1937,15 +2206,10 @@ def const_parameter(*args):
     Raises:
         NotImplementedError: Only works with Parameters and LookupParameters.
     """
-    for p in args:
-      if not (isinstance(p, Parameters) or isinstance(p, LookupParameters)):
-        raise NotImplementedError(
-            "Cannot call const_parameter() on anything other than Parameters or LookupParameters")
     if len(args) == 1:
-      return args[0].expr(False)  # False=update parameter
+        return nobackprop(args[0])
     else:
-      return tuple(p.expr(False) for p in args)
-
+        return [nobackprop(a) for a in args]
 
 # {{{ Mutable Expressions
 #     These depend values that can be set by the caller
@@ -1982,6 +2246,75 @@ cdef class _inputExpression(Expression):
 
 def scalarInput(float s, device=""):
     return _cg.inputValue(s, device)
+
+cdef class _tensorInputExpression(Expression):
+    cdef vector[float] val
+    cdef FloatVectorValue reusable_val
+    cdef bool reusable
+    def __cinit__(self, ComputationGraph g, vector[float] val, dim=None, batch_size=1, device="", reusable_expr=False):
+        self.reusable = reusable_expr
+        if reusable_expr:
+            self.reusable_val = FloatVectorValue(val)
+        else:
+            self.val = val
+        if dim is None: dim = val.size()
+        self.cg_version = g.version()
+        cdef CExpression e
+        cdef CDevice* dev
+        if str(device) != "":
+            dev = c_str2dev(device)
+            if reusable_expr:
+                e = c_input(self.cgp()[0], Dim(dim,batch_size=batch_size), self.reusable_val.addr(), dev)
+            else:
+                e = c_input(self.cgp()[0], Dim(dim,batch_size=batch_size), &self.val, dev)
+        else:
+            if reusable_expr:
+                e = c_input(self.cgp()[0], Dim(dim,batch_size=batch_size), self.reusable_val.addr())
+            else:
+                e = c_input(self.cgp()[0], Dim(dim,batch_size=batch_size), &self.val)
+        self.vindex = e.i
+        g._inputs.append(self)
+    def set(self, vector[float] data):
+        """Change the value of the expression
+        
+        This is useful if you want to to change the input and recompute the graph without needing to re-create it. Don't forget to use :code:`recalculate=True` when calling :code:`.value()` on the output.
+        This allows you to use dynet as a static framework.
+        For now this only accepts new values as flattened arrays (column majors). TODO : change this
+
+        Args:
+            data(vector[float]): New value
+        """
+        if not self.reusable: raise ValueError("set() can only be called on a reusable _tensorInputExpression")
+        self.cgp().invalidate()
+        self.reusable_val.set(data)
+
+
+cdef class inputTensorTranspose(Expression):
+    """
+    This allows inputting a raw numpy tensor in column-major format.
+    At input time, the numpy array can have only one dimension (it's possible to input a 1-d view on a multi-d tensor), while the expression dimensions can be controled using the dim and batch_size arguments.
+    """
+
+    cdef vector[float] val
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    def __cinit__(self, vector[float] val, dim=None, batch_size=1, device=""):
+        self.val = val
+        if dim is None: dim = (self.val.size(), )
+        total_size = batch_size
+        for d in dim: total_size *= d
+        if total_size != int(self.val.size()): raise ValueError("dimensions/batch size multiply to", total_size, ", which does not match size of given array", self.val.size())
+        self.cg_version = _cg.version()
+        cdef CExpression e
+        cdef CDevice* dev
+        if str(device) != "":
+            dev = c_str2dev(device)
+            e = c_input(self.cgp()[0], Dim(dim,batch_size=batch_size), &self.val, dev)
+        else:
+            e = c_input(self.cgp()[0], Dim(dim,batch_size=batch_size), &self.val)
+        self.vindex = e.i
+        _cg._inputs.append(self)
 
 cdef class _vecInputExpression(Expression):
     """Subclass of Expression corresponding to any non-scalar input expressions
@@ -2107,7 +2440,8 @@ def inputMatrix(vector[float] v, tuple d):
     """
     raise DeprecationWarning('matInput is now deprecated. Use dynet.inputTensor instead')
 
-def inputTensor(arr,batched=False,device=""):
+@cython.boundscheck(False)
+def inputTensor(arr,batched=False,device="",reusable_expr=False):
     """Creates a tensor expression based on a numpy array or a list.
     
     The dimension is inferred from the shape of the input.
@@ -2137,12 +2471,13 @@ def inputTensor(arr,batched=False,device=""):
         raise TypeError("Input Tensor should be a numpy.ndarray or a valid list of floats")
     if batched:
         dim = arr.shape[:-1] if len(arr.shape) > 1 else (1,)
-        batch_size= arr.shape[-1]
+        batch_size = arr.shape[-1]
     else:
         dim = arr.shape
         batch_size= 1
-    arr = arr.flatten(order='F')
-    return _cg.inputMatrixLiteral(arr, dim,batch_size=batch_size,device=device)
+    if len(dim)>1 or batch_size > 1:
+        arr = arr.flatten(order='F')
+    return _tensorInputExpression(_cg, arr, dim, batch_size=batch_size, device=device, reusable_expr=reusable_expr)
 
 
 def sparse_inputTensor(idxs, values, shape, batched=False, defval=0,device=""):
@@ -2182,6 +2517,29 @@ def sparse_inputTensor(idxs, values, shape, batched=False, defval=0,device=""):
         batch_size = 1
     idxs = np.ravel_multi_index(idxs, shape, order='F')
     return _cg.inputSparseTensor(idxs, values, dim, batch_size=batch_size, defval=defval, device=device)
+
+cpdef one_hot(d, idx, device=""):
+    """Inputs a one hot vector into the graph.
+    A one hot vecotr is a vector where one coordinate is 1 and everything else is 0
+    If ``idx`` is a list, returns a batch of one hot vectors where batch element ``b`` is one hot in ``idx[b]``
+
+    Args:
+        d (int): dimension of the vector(s)
+        idx (int,list): One hot index
+        device(string): Optional, device on which to create the expression.
+    
+    Returns:
+        Expression: One hot vector(s) expression
+    """
+    if isinstance(idx, int):
+        idx = [idx]
+    idxs = np.asarray(idx, dtype=int)
+    cdef CDevice* dev
+    if str(device) != "":
+        dev = c_str2dev(str(device))
+        return Expression.from_cexpr(_cg.version(), c_one_hot(_cg.thisptr[0], <unsigned> d, <vector[unsigned]> idxs, <CDevice*> dev))
+    else:
+        return Expression.from_cexpr(_cg.version(), c_one_hot(_cg.thisptr[0], <unsigned> d, <vector[unsigned]> idxs))
 
 cdef class _lookupExpression(Expression):
     """Expression corresponding to a lookup from lookup parameter
@@ -2409,7 +2767,7 @@ cpdef Expression constant(dim, float val, int batch_size=1):
     """
     return Expression.from_cexpr(_cg.version(), c_constant(_cg.thisptr[0], Dim(dim, batch_size), val))
 
-cpdef Expression random_normal(dim, int batch_size=1): 
+cpdef Expression random_normal(dim, float mean=0., float stddev=1., int batch_size=1): 
     """Create a random normal vector
     
     Create a vector distributed according to normal distribution with mean 0, variance 1.
@@ -2418,12 +2776,14 @@ cpdef Expression random_normal(dim, int batch_size=1):
         dim (tuple, int): Dimension of the tensor
     
     Keyword Arguments:
+        mean (float): mean of the distribution (default: 0.0)
+        stddev (float): standard deviation of distribution (default: 1.0)
         batch_size (number): Batch size of the tensor  (default: (1))
     
     Returns:
         dynet.Expression: A "d" dimensioned normally distributed tensor
     """
-    return Expression.from_cexpr(_cg.version(), c_random_normal(_cg.thisptr[0], Dim(dim, batch_size)))
+    return Expression.from_cexpr(_cg.version(), c_random_normal(_cg.thisptr[0], Dim(dim, batch_size), mean, stddev))
 cpdef Expression random_bernoulli(dim, float p, float scale=1.0, int batch_size=1):
     """Create a random bernoulli tensor
     
@@ -2489,7 +2849,7 @@ cpdef Expression nobackprop(Expression x):
     """
     return Expression.from_cexpr(x.cg_version, c_nobackprop(x.c()))
 cpdef Expression flip_gradient(Expression x):
-    """Negative backprop
+    """Flip gradient
     
     This node has no effect on the forward pass, but takes negative on backprop process. This operation is widely used in adversarial networks.
     
@@ -2500,6 +2860,57 @@ cpdef Expression flip_gradient(Expression x):
         dynet.Expression: An output expression containing the same as input (only effects on backprop process)
     """
     return Expression.from_cexpr(x.cg_version, c_flip_gradient(x.c()))
+
+cpdef Expression scale_gradient(Expression x, float lambd = 1.0):
+    """Scale gradient
+    
+    This node scales the gradient by a constant on backprop, with no effect on the forward pass.
+    
+    Args:
+        x (dynet.Expression): Input expression
+        lambd (dynet.Expression): Input expression
+    
+    Returns:
+        dynet.Expression: An output expression containing the same as input (only effects on backprop process)
+    """
+    return Expression.from_cexpr(x.cg_version, c_scale_gradient(x.c(), lambd))
+
+
+cpdef Expression argmax(Expression x, str gradient_mode):
+    """Argmax
+    
+    This node takes an input vector :math:`x` and returns a one hot vector :math:`y` such that :math:`y_{\\text{argmax} x}=1`
+    There are two gradient modes for this operation:
+
+    .. code-block:: python
+        
+        argmax(x, gradient_mode="zero_gradient")
+
+    is the standard argmax operation. Note that this almost everywhere differentiable and its gradient is 0. **It will stop your gradient**
+
+    .. code-block:: python
+        
+        argmax(x, gradient_mode="straight_through_gradient")
+    
+    This gradient mode implements the straight-through estimator `(Bengio et al., 2013) <https://arxiv.org/abs/1308.3432>`_.
+    Its forward pass is the same as the argmax operation, but its gradient is the same as the identity function.
+    Note that this does not technically correspond to a differentiable function (hence the name "estimator").
+    Tensors of order :math:`>1` are not supported yet. If you really need to use this operation on matrices, tensors, etc... feel free to open an issue on github.
+    
+    Args:
+        x (dynet.Expression): The input vector (can be batched)
+        gradient_mode (str): Gradient mode for the backward pass (one of :code:`"zero_gradient"` or :code:`"straight_through_gradient"`
+    
+    Returns:
+        dynet.Expression: The one hot argmax vector
+    """
+    if gradient_mode == "zero_gradient":
+        return Expression.from_cexpr(x.cg_version, c_argmax(x.c(), c_ArgmaxGradient.zero_gradient))
+    elif gradient_mode == "straight_through_gradient":
+        return Expression.from_cexpr(x.cg_version, c_argmax(x.c(), c_ArgmaxGradient.straight_through_gradient))
+    else:
+        raise ValueError("Unknown gradient mode for argmax: " + gradient_mode)
+
 
 # binary-exp
 cpdef Expression cdiv(Expression x, Expression y):
@@ -2605,6 +3016,34 @@ cpdef Expression dot_product(Expression x, Expression y):
     """
     ensure_freshness(y); 
     return Expression.from_cexpr(x.cg_version, c_dot_product(x.c(), y.c()))
+cpdef Expression circ_conv(Expression u, Expression v):
+    """Circular convolution
+
+    Calculate the circular convolution :math:`[u * v]_k=\sum_i u_iv_{(k-i) \mod d}`
+
+    Args:
+        u (dynet.Expression): The first input expression
+        v (dynet.Expression): The second input expression
+
+    Returns:
+        dynet.Expression: :math:`u * v`
+    """
+    ensure_freshness(v);
+    return Expression.from_cexpr(u.cg_version, c_circ_conv(u.c(), v.c()))
+cpdef Expression circ_corr(Expression u, Expression v):
+    """Circular correlation
+
+    Calculate the circular correlation :math:`[u \star v]_k=\sum_i u_iv_{(i + k) \mod d}`
+
+    Args:
+        u (dynet.Expression): The first input expression
+        v (dynet.Expression): The second input expression
+
+    Returns:
+        dynet.Expression: :math:`u \star v`
+    """
+    ensure_freshness(v);
+    return Expression.from_cexpr(u.cg_version, c_circ_corr(u.c(), v.c()))
 cpdef Expression squared_norm(Expression x):
     """Squared norm
     
@@ -2660,7 +3099,7 @@ cpdef Expression l1_distance(Expression x, Expression y):
 cpdef Expression binary_log_loss(Expression x, Expression y):
     """Binary log loss
     
-    The log loss of a binary decision according to the sigmoid sigmoid function :math:`- \sum_i (y_i  \ln(x_i) + (1-y_i)  \ln(1-x_i))`
+    The log loss of a binary decision according to the sigmoid function :math:`- \sum_i (y_i  \ln(x_i) + (1-y_i)  \ln(1-x_i))`
     
     Args:
         x (dynet.Expression): The first input expression
@@ -2813,7 +3252,103 @@ cpdef Expression maxpooling2d(Expression x, vector[unsigned] ksize, vector[unsig
     return Expression.from_cexpr(x.cg_version, c_maxpooling2d(x.c(), ksize, stride, is_valid))
 
 # unary-exp
-cpdef Expression tanh(Expression x): 
+cpdef Expression sin(Expression x):
+    """Sine
+
+    Elementwise calculation of the sine
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\sin(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_sin(x.c()))
+cpdef Expression cos(Expression x):
+    """Cosine
+
+    Elementwise calculation of the cosine
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\cos(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_cos(x.c()))
+cpdef Expression tan(Expression x):
+    """Tangent
+
+    Elementwise calculation of the tangent
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\tan(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_tan(x.c()))
+cpdef Expression asin(Expression x):
+    """Inverse sine
+
+    Elementwise calculation of the inverse sine
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\sin^{-1}(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_asin(x.c()))
+cpdef Expression acos(Expression x):
+    """Inverse cosine
+
+    Elementwise calculation of the inverse cosine
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\cos^{-1}(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_acos(x.c()))
+cpdef Expression atan(Expression x):
+    """Tangent
+
+    Elementwise calculation of the inverse tangent
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\tan^{-1}(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_atan(x.c()))
+cpdef Expression sinh(Expression x):
+    """Hyperbolic sine
+
+    Elementwise calculation of the hyperbolic sine
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\sinh(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_sinh(x.c()))
+cpdef Expression cosh(Expression x):
+    """Hyperbolic cosine
+
+    Elementwise calculation of the hyperbolic cosine
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\cosh(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_cosh(x.c()))
+cpdef Expression tanh(Expression x):
     """Hyperbolic tangent
     
     Elementwise calculation of the hyperbolic tangent
@@ -2825,7 +3360,43 @@ cpdef Expression tanh(Expression x):
         dynet.Expression: :math:`\\tanh(x)`
     """
     return Expression.from_cexpr(x.cg_version, c_tanh(x.c()))
-cpdef Expression exp(Expression x): 
+cpdef Expression asinh(Expression x):
+    """Inverse hyperbolic sine
+
+    Elementwise calculation of the inverse hyperbolic sine
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\sinh^{-1}(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_asinh(x.c()))
+cpdef Expression acosh(Expression x):
+    """Inverse hyperbolic cosine
+
+    Elementwise calculation of the inverse hyperbolic cosine
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\cosh^{-1}(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_acosh(x.c()))
+cpdef Expression atanh(Expression x):
+    """Inverse hyperbolic tangent
+
+    Elementwise calculation of the inverse hyperbolic tangent
+
+    Args:
+        x (dynet.Expression): Input expression
+
+    Returns:
+        dynet.Expression: :math:`\\tanh^{-1}(x)`
+    """
+    return Expression.from_cexpr(x.cg_version, c_atanh(x.c()))
+cpdef Expression exp(Expression x):
     """Natural exponent
     
     Calculate elementwise :math:`y_i = e^{x_i}`
@@ -2837,7 +3408,7 @@ cpdef Expression exp(Expression x):
         dynet.Expression: :math:`e^{x}`
     """
     return Expression.from_cexpr(x.cg_version, c_exp(x.c()))
-cpdef Expression square(Expression x): 
+cpdef Expression square(Expression x):
     """Square
     
     Calculate elementwise :math:`y_i = x_i^2`
@@ -2911,6 +3482,19 @@ cpdef Expression log(Expression x):
         dynet.Expression: :math:`y_i = \ln(x_i)`
     """
     return Expression.from_cexpr(x.cg_version, c_log(x.c()))
+cpdef Expression log_sigmoid(Expression x): 
+    """Log sigmoid
+    
+    Calculate elementwise log sigmoid function :math:`y_i = \ln(\\frac{1}{1+e^{x_i}})`
+    This is more numerically stable than `log(logistic(x))`
+    
+    Args:
+        x (dynet.Expression): Input expression
+    
+    Returns:
+        dynet.Expression: :math:`y_i = \ln(\\frac{1}{1+e^{x_i}})`
+    """
+    return Expression.from_cexpr(x.cg_version, c_log_sigmoid(x.c()))
 cpdef Expression lgamma(Expression x): 
     """Log gamma
     
@@ -3076,17 +3660,34 @@ cpdef Expression softsign(Expression x):
     """
     return Expression.from_cexpr(x.cg_version, c_softsign(x.c()))
 
+cpdef Expression constrained_softmax(Expression x, Expression y):
+    """Constrained softmax function
+
+    The constrained softmax function (Martins and Kreutzer, 2017) is similar to softmax, but defines upper bounds for the resulting probabilities. **Note:** This function is not yet implemented on GPU.
+    
+    Args:
+        x (dynet.Expression): Input expression (scores)
+        y (dynet.Expression): Input expression (upper bounds)
+    
+    Returns:
+        dynet.Expression: The constrained softmax of the scores, satisfying the upper bound constraints
+
+    """
+    ensure_freshness(y);
+    return Expression.from_cexpr(x.cg_version,
+                                 c_constrained_softmax(x.c(), y.c()))
+
 cpdef Expression pow(Expression x, Expression y):
     """Power function
     
-    Calculate an output where the ith element is equal to :math:`x_i^{y_i}`
+    Calculate an output where the ith element is equal to :math:`x_i^{y}`
 
     Args:
         x (dynet.Expression): The first input expression
-        y (dynet.Expression): The second input expression
+        y (dynet.Expression): The second input expression(scalar expression)
     
     Returns:
-        dynet.Expression: :math:`x_i^{y_i}`
+        dynet.Expression: :math:`x_i^{y}`
     """
     ensure_freshness(y); 
     return Expression.from_cexpr(x.cg_version, c_pow(x.c(), y.c()))
@@ -3180,7 +3781,7 @@ cpdef Expression sum_elems(Expression x):
     return Expression.from_cexpr(x.cg_version, c_sum_elems(x.c()))
 
 cpdef Expression sum_dim(Expression x, list d, bool b=False, unsigned n=0):
-    """Mean along an arbitrary dimension
+    """Sum along an arbitrary dimension
     
     Computes the sum :math:`\sum_ix_i`  along an arbitrary dimension or dimensions.
 
@@ -3207,6 +3808,21 @@ cpdef Expression sum_batches(Expression x):
         dynet.Expression: An expression with a single batch
     """
     return Expression.from_cexpr(x.cg_version, c_sum_batches(x.c()))
+
+cpdef Expression cumsum(Expression x, unsigned d=0):
+    """Cumulative sum along an arbitrary dimension
+    
+    Computes the cumulative sum :math:`y_i=\sum_{j\leq i}x_j`  along an arbitrary dimension.
+
+    Args:
+        x (dynet.Expression): Input expression
+        d (int): Dimension along which to compute the cumulative sums (default: 0)
+    
+    Returns:
+        dynet.Expression: An expression with the same dimension as the input
+    """
+    return Expression.from_cexpr(x.cg_version, c_cumsum(x.c(), d))
+
 
 cpdef Expression mean_elems(Expression x):
     """Mean of elements of the tensor
@@ -3370,19 +3986,19 @@ cpdef Expression pairwise_rank_loss(Expression x, Expression y, float m=1.0):
     """
     ensure_freshness(y);
     return Expression.from_cexpr(x.cg_version, c_pairwise_rank_loss(x.c(), y.c(), m))
-cpdef Expression poisson_loss(Expression x, unsigned y):
+cpdef Expression poisson_loss(Expression log_lambda, unsigned x):
     """Poisson loss
     
-    The negative log probability of :code:`y` according to a Poisson distribution with parameter :code:`x`. Useful in Poisson regression where, we try to predict the parameters of a Possion distribution to maximize the probability of data :code:`y`.
+    The negative log probability of :code:`x` according to a Poisson distribution with parameter :math:`\exp` :code:`log_lambda`. Useful in Poisson regression where, we try to predict the parameters of a Possion distribution to maximize the probability of data :code:`x`.
     
     Args:
-        x (dynet.Expression): The first input expression
-        y (dynet.Expression): The second input expression
+        log_lambda (dynet.Expression): The log of the Poisson distribution's lambda
+        x (int): The target value
     
     Returns:
         dynet.Expression: The Poisson loss
     """
-    return Expression.from_cexpr(x.cg_version, c_poisson_loss(x.c(), y))
+    return Expression.from_cexpr(log_lambda.cg_version, c_poisson_loss(log_lambda.c(), x))
 cpdef Expression huber_distance(Expression x, Expression y, float c=1.345):
     """Huber distance
     
@@ -3390,7 +4006,7 @@ cpdef Expression huber_distance(Expression x, Expression y, float c=1.345):
 
     .. math::
 
-        L_c(x, y) = \\begin{cases}{lr}
+        L_c(x, y) = \\begin{cases}
         \\frac{1}{2}(y - x)^2                   & \\textrm{for } \\vert y - f(x)\\vert  \le c, \\\\
         c\, \\vert y - f(x)\\vert  - \\frac{1}{2}c^2 & \\textrm{otherwise.}
         \end{cases}
@@ -3620,6 +4236,23 @@ cpdef Expression pick_batch_elems(Expression x, vector[unsigned] vs):
         dynet.Expression: The expression of picked batch elements. The batch elements is a tensor whose batch dimension equals to the size of list `v`.
     """
     return Expression.from_cexpr(x.cg_version, c_pick_batch_elems(x.c(), vs))
+
+cpdef Expression strided_select(Expression x, vector[int] strides, vector[int] range_from, vector[int] range_to):
+    """Strided select in multiple dimensions.
+    
+    Select a range and/or stride of elements from an expression.
+
+    Args:
+        x (dynet.Expression): Input expression
+        strides (list): List of strides for each dimension, must be >= 1. Dimensions not included default to 1. Batch dimension can be included as very last dimension.
+        range_from (list):    List of 0-based offsets (inclusive) for each dimension, must be >= 0. Dimensions not included default to 0. Batch dimension can be included as very last dimension.
+        range_to (list):      List of highest 0-based index to select (exclusive) for each dimension, must be >= 0. Dimensions not included default to the corresponding dim size. Batch dimension can be included as very last dimension.
+            
+    Returns:
+        dynet.Expression: The value of x[from[0]:to[0]:strides[0],..] (as it would be in numpy syntax)
+    """
+    return Expression.from_cexpr(x.cg_version, c_strided_select(x.c(), strides, range_from, range_to))
+
 #expr-float
 cpdef Expression noise(Expression x, float stddev):
     """Additive gaussian noise
@@ -3860,6 +4493,7 @@ cpdef Expression esum(list xs):
     cvec = vector[CExpression]()
     cdef Expression x
     for x in xs:
+        assert x, 'Empty element for esum.'
         ensure_freshness(x)
         cvec.push_back(x.c())
     #print(cvec.size(), file=sys.stderr)
@@ -3881,6 +4515,7 @@ cpdef Expression logsumexp(list xs):
     cvec = vector[CExpression]()
     cdef Expression x
     for x in xs:
+        assert x, 'Empty element for logsumexp.'
         ensure_freshness(x)
         cvec.push_back(x.c())
     #print(cvec.size(), file=sys.stderr)
@@ -3916,6 +4551,7 @@ cpdef Expression average(list xs):
     cdef vector[CExpression] cvec
     cdef Expression x
     for x in xs: 
+        assert x, 'Empty element for average.'
         ensure_freshness(x) 
         cvec.push_back(x.c())
     return Expression.from_cexpr(x.cg_version, c_average(cvec))
@@ -3937,6 +4573,7 @@ cpdef Expression emax(list xs):
     c = xs[0]
     ensure_freshness(c) 
     for x in xs: 
+        assert x, 'Empty element for emax.'
         ensure_freshness(x) 
         c = Expression.from_cexpr(x.cg_version, c_bmax(x.c(),c.c()))
     return c
@@ -3953,10 +4590,11 @@ cpdef Expression concatenate_cols(list xs):
     Returns:
         dynet.Expression: The expression with the columns concatenated
     """
-    assert xs, 'List is empty, nothing to concatenate.'
+    assert xs, 'List is empty, nothing to concatenate_cols.'
     cdef vector[CExpression] cvec
     cdef Expression x
     for x in xs:
+        assert x, 'Empty element for concatenate_cols.'
         ensure_freshness(x) 
         cvec.push_back(x.c())
     return Expression.from_cexpr(x.cg_version, c_concat_cols(cvec))
@@ -3978,6 +4616,7 @@ cpdef Expression concatenate(list xs, unsigned d=0):
     cdef vector[CExpression] cvec
     cdef Expression x
     for x in xs:
+        assert x, 'Empty element for concatenate.'
         ensure_freshness(x) 
         cvec.push_back(x.c())
     return Expression.from_cexpr(x.cg_version, c_concat(cvec, d))
@@ -3993,10 +4632,11 @@ cpdef Expression concatenate_to_batch(list xs):
     Returns:
         dynet.Expression: The expression with the batch dimensions concatenated
     """
-    assert xs, 'List is empty, nothing to concatenate.'
+    assert xs, 'List is empty, nothing to concatenate_to_batch.'
     cdef vector[CExpression] cvec
     cdef Expression x
     for x in xs:
+        assert x, 'Empty element for concatenate_to_batch.'
         ensure_freshness(x) 
         cvec.push_back(x.c())
     return Expression.from_cexpr(x.cg_version, c_concat_to_batch(cvec))
@@ -4016,6 +4656,7 @@ cpdef Expression affine_transform(list exprs):
     cdef Expression e
     cdef vector[CExpression] ves
     for e in exprs:
+        assert e, 'Empty element for affine_transform.'
         ensure_freshness(e) 
         ves.push_back(e.c())
     return Expression.from_cexpr(e.cg_version, c_affine_transform(ves))
@@ -4304,21 +4945,23 @@ cdef class _RNNBuilder: # {{{
         Args:
             vecs (list): Initial hidden state for each layer as a list of :code:`dynet.Expression` s  (default: {None})
             update (bool): trainer updates internal parameters (default: {True})
+                           NOTE: subsequent calls without calling dynet.renew_cg() will not change the `update` behavior.
         
         Returns:
             :code:`dynet.RNNState` used to feed inputs/transduces sequences, etc...
             dynet.RNNState
         """
+        # if we didn't initialize for this CG yet, create a new _init_state
         if self.cg_version != _cg.version():
             self.new_graph(update)
-            if vecs is not None:
-                self.start_new_sequence(vecs)
-            else:
-                self.start_new_sequence()
+            self.start_new_sequence()
             self._init_state = RNNState(self, -1)
+        # if we have vecs, return a new state based on the initial state
+        if vecs is not None:
+            return self._init_state.set_s(vecs)
         return self._init_state
 
-    cpdef RNNState initial_state_from_raw_vectors(self,vecs=None, update=True):
+    cpdef RNNState initial_state_from_raw_vectors(self,vecs, update=True):
         """Get a :code:`dynet.RNNState`
         
         This initializes a :code:`dynet.RNNState` by loading the parameters in the computation graph
@@ -4328,33 +4971,33 @@ cdef class _RNNBuilder: # {{{
         Args:
             vecs (list): Initial hidden state for each layer as a list of numpy arrays  (default: {None})
             update (bool): trainer updates internal parameters (default: {True})
+                           NOTE: subsequent calls without calling dynet.renew_cg() will not change the `update` behavior.
         
         Returns:
             :code:`dynet.RNNState` used to feed inputs/transduces sequences, etc...
             dynet.RNNState
         """
-        if self.cg_version != _cg.version():
-            self.new_graph(update)
-            if vecs is not None:
-                es = []
-                for v in vecs:
-                    e = vecInput(len(v))
-                    e.set(v)
-                    es.append(e)
-                self.start_new_sequence(es)
-            else:
-                self.start_new_sequence()
-            self._init_state = RNNState(self, -1)
-        return self._init_state
+        return self.initial_state([inputTensor(v) for v in vecs],update)
 
     cpdef ParameterCollection param_collection(self):
         return ParameterCollection.wrap(self.thisptr.get_parameter_collection())
 # _RNNBuilder }}}
 
 cdef class SimpleRNNBuilder(_RNNBuilder): # {{{
-    """[summary]
-    
-    [description]
+    """ Simple RNNBuilder with tanh as the activation.
+    This cell runs according to the following dynamics :
+
+    .. math::
+
+        \\begin{split}
+            h_t & =\tanh(W_{x}x_t+W_{h}h_{t-1}+b)\\\\
+        \end{split}
+
+    Args:
+        layers (int): Number of layers
+        input_dim (int): Dimension of the input
+        hidden_dim (int): Dimension of the recurrent units
+        model (dynet.ParameterCollection): ParameterCollection to hold the parameters
     """
     cdef CSimpleRNNBuilder* thissimpleptr
     cdef tuple _spec
@@ -4413,6 +5056,41 @@ cdef class SimpleRNNBuilder(_RNNBuilder): # {{{
                 layer_exprs.append(Expression.from_cexpr(_cg.version(),w))
             exprs.append(layer_exprs)
         return exprs
+
+    cpdef void set_dropouts(self, float d, float d_h):
+        """Set the dropout rates
+        
+        The dropout implemented here is the variational dropout introduced in `Gal, 2016 <http://papers.nips.cc/paper/6241-a-theoretically-grounded-application-of-dropout-in-recurrent-neural-networks>`_
+
+        More specifically, dropout masks :math:`\mathbf{z_x}\sim \\text{Bernoulli}(1-d)`, :math:`\mathbf{z_h}\sim \\text{Bernoulli}(1-d_h)` are sampled at the start of each sequence.
+
+        The dynamics of the cell are then modified to :
+
+        .. math::
+
+            \\begin{split}
+                h_t & =\\tanh(W_{x}(\\frac 1 {1-d}\mathbf{z_x} \circ x_t)+W_{h}(\\frac 1 {1-d}\mathbf{z_h} \circ h_{t-1})+b)
+            \end{split}
+
+        For more detail as to why scaling is applied, see the "Unorthodox" section of the documentation
+
+        Args:
+            d (number): Dropout rate :math:`d` for the input.
+            d_h (number): Dropout rate :math:`d_h` for the hidden unit :math:`h_t`
+        """
+        self.thissimpleptr.set_dropout(d,d_h)
+
+    cpdef void set_dropout_masks(self, unsigned batch_size=1):
+        """Set dropout masks at the beginning of a sequence for a specific batch size
+        
+        If this function is not called on batched input, the same mask will be applied across all batch elements. Use this to apply different masks to each batch element
+
+        You need to call this __AFTER__ calling `initial_state`
+        
+        Args:
+            batch_size (int): Batch size (default: {1})
+        """
+        self.thissimpleptr.set_dropout_masks(batch_size)
 
     def whoami(self): return "SimpleRNNBuilder"
 # SimpleRNNBuilder }}}
@@ -4583,14 +5261,14 @@ cdef class VanillaLSTMBuilder(_RNNBuilder): # {{{
         hidden_dim (int): Dimension of the recurrent units
         model (dynet.ParameterCollection): ParameterCollection to hold the parameters
         ln_lstm (bool): Whether to use layer normalization
-
+        forget_bias (float): value to use as forget gate bias(default 1.0)
     """
     cdef CVanillaLSTMBuilder* thisvanillaptr
     cdef tuple _spec
-    def __init__(self, unsigned layers, unsigned input_dim, unsigned hidden_dim, ParameterCollection model, ln_lstm=False):
-        self._spec = (layers, input_dim, hidden_dim, ln_lstm)
+    def __init__(self, unsigned layers, unsigned input_dim, unsigned hidden_dim, ParameterCollection model, ln_lstm=False, forget_bias=1.0):
+        self._spec = (layers, input_dim, hidden_dim, ln_lstm, forget_bias)
         if layers > 0:
-            self.thisvanillaptr = self.thisptr = new CVanillaLSTMBuilder(layers, input_dim, hidden_dim, model.thisptr, ln_lstm)
+            self.thisvanillaptr = self.thisptr = new CVanillaLSTMBuilder(layers, input_dim, hidden_dim, model.thisptr, ln_lstm, forget_bias)
         else:
             self.thisvanillaptr = self.thisptr = new CVanillaLSTMBuilder()
         self.cg_version = -1
@@ -4600,8 +5278,8 @@ cdef class VanillaLSTMBuilder(_RNNBuilder): # {{{
 
     @classmethod
     def from_spec(cls, spec, model):
-        layers, input_dim, hidden_dim, ln_lstm = spec
-        return VanillaLSTMBuilder(layers, input_dim, hidden_dim, model, ln_lstm)
+        layers, input_dim, hidden_dim, ln_lstm, forget_bias = spec
+        return VanillaLSTMBuilder(layers, input_dim, hidden_dim, model, ln_lstm, forget_bias)
 
 # TODO rename to parameters()?
     cpdef get_parameters(self):
@@ -4974,8 +5652,8 @@ class BiRNNBuilder(object): # {{{
         self.spec = num_layers, input_dim, hidden_dim, rnn_builder_factory, builder_layers
         model = self.model = model.add_subcollection("birnn")
         if builder_layers is None:
-            assert num_layers > 0
-            assert hidden_dim % 2 == 0, "BiRNN hidden dimension must be even."
+            assert num_layers > 0, "BiRNN number of layers must be positive: %d" % num_layers
+            assert hidden_dim % 2 == 0, "BiRNN hidden dimension must be even: %d" % hidden_dim
             self.builder_layers = []
             f = rnn_builder_factory(1, input_dim, hidden_dim/2, model)
             b = rnn_builder_factory(1, input_dim, hidden_dim/2, model)
@@ -5368,6 +6046,9 @@ cdef class Trainer:
     @learning_rate.setter
     def learning_rate(self, value):
         self.thisptr.learning_rate = value
+    
+    def set_learning_rate(self, value):
+        self.thisptr.learning_rate = value
 
 cdef class SimpleSGDTrainer(Trainer):
     """Stochastic gradient descent trainer
@@ -5407,10 +6088,10 @@ cdef class CyclicalSGDTrainer(Trainer):
         learning_rate_min (number): Lower learning rate (default: {0.01})
         learning_rate_max (number): Upper learning rate (default: {0.1})
         step_size (number): Period of the triangular function in number of iterations (__not__ epochs). According to the original paper, this should be set around (2-8) x (training iterations in epoch) (default: {2000})
-        gamma (number): Learning rate upper bound decay parameter (default: {0.0})
+        gamma (number): Learning rate upper bound decay parameter (1.0 = no decay) (default: {1.0})
     """
     cdef CCyclicalSGDTrainer *thischildptr
-    def __cinit__(self, ParameterCollection m, float learning_rate_min = 0.01, float learning_rate_max = 0.1, float step_size = 2000, float gamma = 0.0):
+    def __cinit__(self, ParameterCollection m, float learning_rate_min = 0.01, float learning_rate_max = 0.1, float step_size = 2000, float gamma = 1.0):
         self.thischildptr = self.thisptr = new CCyclicalSGDTrainer(m.thisptr, learning_rate_min, learning_rate_max, step_size, gamma)
     cpdef update(self):
         self.thischildptr.update()
@@ -5507,6 +6188,25 @@ cdef class AdamTrainer(Trainer):
         self.thisptr = new CAdamTrainer(m.thisptr, alpha, beta_1, beta_2, eps)
     def whoami(self):
         return "AdamTrainer"
+
+cdef class AmsgradTrainer(Trainer):
+    """AMSGrad optimizer
+    
+    The AMSGrad optimizer is similar to Adam which uses unbiased estimates of the first and second moments of the gradient, however AMSGrad keeps the maximum of all the second moments and uses that instead
+    
+    Args:
+        m(dynet.ParameterCollection): ParameterCollection to be trained
+    
+    Keyword Args:
+        alpha(number): Initial learning rate (default: 0.001)
+        beta_1(number): Moving average parameter for the mean (default: 0.9)
+        beta_2(number): Moving average parameter for the variance (default: 0.999)
+        eps(number): Epsilon parameter to prevent numerical instability (default: 1e-8)
+    """
+    def __cinit__(self, ParameterCollection m, float alpha = 0.001, float beta_1 = 0.9, float beta_2 = 0.999, float eps = 1e-8 ):
+        self.thisptr = new CAmsgradTrainer(m.thisptr, alpha, beta_1, beta_2, eps)
+    def whoami(self):
+        return "AmsgradTrainer"
 
 # Trainers }}}
 
@@ -5745,3 +6445,4 @@ cdef class ClassFactoredSoftmaxBuilder(SoftmaxBuilder):
         return Expression.from_cexpr(self.cg_version, self.thiscfptr.subclass_logits(x.c(), classid))
 
 # Softmax Builders }}}
+

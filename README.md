@@ -11,8 +11,6 @@
 
 The Dynamic Neural Network Toolkit
 
-**News!** The master branch is now DyNet version 2.0 (as of 6/28/2017), which contains a number of changes including a new model format, etc. If you're looking for the old version, check out the [v1.1 branch](https://github.com/clab/dynet/tree/v1.1).
-
 - [General](#general)
 - [Installation](#installation)
   - [C++](#c-installation)
@@ -64,7 +62,7 @@ released versions, you may get assertion failures or compile errors.**
 If you don't have Eigen already, you can get it easily using the
 following command:
 
-    hg clone https://bitbucket.org/eigen/eigen/ -r 699b659
+    hg clone https://bitbucket.org/eigen/eigen/ -r b2e267d
 
 The `-r NUM` specified a revision number that is known to work.  Adventurous
 users can remove it and use the very latest version, at the risk of the code
@@ -81,8 +79,6 @@ You can install dynet for C++ with the following commands
     # Clone the github repository
     git clone https://github.com/clab/dynet.git
     cd dynet
-    # Checkout the latest release
-    git checkout tags/v2.0
     mkdir build
     cd build
     # Run CMake
@@ -116,8 +112,6 @@ If you use DyNet for research, please cite this report as follows:
     }
 
 
-## Releases and Contributing
-
-The current release of DyNet is [v2.0](https://github.com/clab/dynet/releases/tag/v2.0).
+## Contributing
 
 We welcome any contribution to DyNet! You can find the contributing guidelines [here](http://dynet.readthedocs.io/en/latest/contributing.html)

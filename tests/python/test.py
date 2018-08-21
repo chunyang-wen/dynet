@@ -137,11 +137,11 @@ class TestParameters(unittest.TestCase):
         res.backward()
         # Should print the value of x
         self.assertTrue(np.allclose(p.grad_as_array(), x.npvalue()), msg="Gradient is wrong")
-    
+
     def test_set_value(self):
         # add parameter
         p = self.m.add_parameters((2, 3), init=dy.ConstInitializer(1))
-        value_to_set = np.arange(6).reshape(2,3)
+        value_to_set = np.arange(6).reshape(2, 3)
         # set the value
         p.set_value(value_to_set)
         self.assertTrue(np.allclose(p.as_array(), value_to_set))
@@ -180,6 +180,23 @@ class TestParameters(unittest.TestCase):
         self.assertTrue(self.p2.is_updated())
         self.assertTrue(self.lp1.is_updated())
         self.assertFalse(self.lp2.is_updated())
+
+        dy.renew_cg()
+        pp1 = dy.parameter(self.p1)
+        pp2 = dy.parameter(self.p2)
+
+        a = pp1 * self.lp1[1]
+        b = pp2 * self.lp2[1]
+        l = dy.dot_product(a, b) / 100
+        l.backward()
+
+        self.trainer.update()
+
+        ones = np.ones((10, 10))
+        self.assertTrue(np.allclose(self.p1.as_array(), ones),
+                        msg=np.array_str(self.p1.as_array()))
+        self.assertTrue(np.allclose(self.lp2.as_array()[1], ones[
+                        0]), msg=np.array_str(self.lp2.as_array()))
 
     def test_update(self):
         ones = np.ones((10, 10))
@@ -228,11 +245,11 @@ class TestParameters(unittest.TestCase):
                 trainer.update()
 
     def test_delete_model(self):
-        p = dy.parameter(dy.ParameterCollection().add_parameters((1,), init=dy.ConstInitializer(1)))
+        p = dy.parameter(dy.ParameterCollection().add_parameters(
+            (1,), init=dy.ConstInitializer(1)))
         p.value()
         gc.collect()
         p.value()
-
 
     def test_delete_parent_model(self):
         model = dy.ParameterCollection().add_subcollection()
@@ -240,6 +257,39 @@ class TestParameters(unittest.TestCase):
         p.value()
         gc.collect()
         p.value()
+
+    def test_parameters_initializers(self):
+
+        p = self.m.add_parameters((3, 5), init=0)
+        p = self.m.add_parameters((3, 5), init='uniform', scale=2.0)
+        p = self.m.add_parameters((3, 5), init='normal', mean=-1.0, std=2.5)
+        p = self.m.add_parameters((5, 5), init='identity')
+        #p = self.m.add_parameters((5,5), init='saxe')
+        p = self.m.add_parameters((3, 5), init='glorot')
+        p = self.m.add_parameters((3, 5), init='he')
+        arr = np.zeros((3,5))
+        p = self.m.add_parameters(arr.shape, init=arr)
+        p = self.m.add_parameters((3, 5), init=dy.ConstInitializer(2.0))
+
+    def test_lookup_parameters_initializers(self):
+
+        p = self.m.add_lookup_parameters((3, 5), init=0)
+        p = self.m.add_lookup_parameters((3, 5), init='uniform', scale=2.0)
+        p = self.m.add_lookup_parameters((3, 5), init='normal', mean=-1.0, std=2.5)
+        p = self.m.add_lookup_parameters((3, 5), init='glorot')
+        p = self.m.add_lookup_parameters((3, 5), init='he')
+        arr = np.zeros((3,5))
+        p = self.m.add_lookup_parameters(arr.shape, init=arr)
+        p = self.m.add_lookup_parameters((3, 5), init=dy.ConstInitializer(2.0))
+
+        array = np.arange(50).reshape(10, 5)
+        p = self.m.add_lookup_parameters(array.shape, init=array)
+
+        slice_array = array[8]
+        slice_param = p.batch([8]).npvalue()
+
+        for i in range(5):
+            self.assertEqual(slice_array[i], slice_param[i])
 
 
 class TestBatchManipulation(unittest.TestCase):
@@ -280,15 +330,31 @@ class TestBatchManipulation(unittest.TestCase):
         w = dy.concatenate_to_batch([y, z])
         self.assertTrue(np.allclose(w.npvalue(), self.pval.T))
 
-
-class TestIO_1(unittest.TestCase):
-
+class TestIOPartialWeightDecay(unittest.TestCase):
     def setUp(self):
-        self.file = "bilstm.model"
-        # create models
+        self.file = "tmp.model"
         self.m = dy.ParameterCollection()
         self.m2 = dy.ParameterCollection()
-        # Create birnn
+        self.p = self.m.add_parameters(1)
+        self.t = dy.SimpleSGDTrainer(self.m)
+
+    def test_save_load(self):
+        self.p.expr().forward()
+        self.p.expr().backward()
+        self.t.update()
+        dy.renew_cg()
+        v1 = self.p.expr().value()
+        dy.save(self.file, [self.p])
+        [p2] = dy.load(self.file, self.m2)
+        v2 = p2.expr().value()
+        self.assertTrue(np.allclose(v1, v2))
+
+
+class TestIOEntireModel(unittest.TestCase):
+    def setUp(self):
+        self.file = "bilstm.model"
+        self.m = dy.ParameterCollection()
+        self.m2 = dy.ParameterCollection()
         self.b = dy.BiRNNBuilder(2, 10, 10, self.m, dy.LSTMBuilder)
 
     def test_save_load(self):
@@ -297,8 +363,24 @@ class TestIO_1(unittest.TestCase):
         self.m2.populate(self.file)
 
 
-class TestIO_2(unittest.TestCase):
+class TestIOPartial(unittest.TestCase):
+    def setUp(self):
+        self.file = "tmp.model"
+        self.m = dy.ParameterCollection()
+        self.m2 = dy.ParameterCollection()
+        self.L = self.m.add_lookup_parameters((10, 2), name="la")
+        self.a = self.m.add_parameters(10, name="a")
 
+    def test_save_load(self):
+        self.L.save(self.file, "/X")
+        self.a.save(self.file, append=True)
+        a = self.m2.add_parameters(10)
+        L = self.m2.add_lookup_parameters((10, 2))
+        L.populate(self.file, "/X")
+        a.populate(self.file, "/a")
+
+
+class TestIOHighLevelAPI(unittest.TestCase):
     def setUp(self):
         self.file = "bilstm.model"
         # create models
@@ -310,6 +392,10 @@ class TestIO_2(unittest.TestCase):
     def test_save_load(self):
         dy.save(self.file, [self.b])
         [b] = dy.load(self.file, self.m2)
+
+    def test_save_load_generator(self):
+        dy.save(self.file, (x for x in [self.b]))
+        [b] = list(dy.load_generator(self.file, self.m2))
 
 
 class TestExpression(unittest.TestCase):
@@ -371,6 +457,20 @@ class TestOperations(unittest.TestCase):
         y_np_value = self.v2 / self.v1.std() * (self.v1 - self.v1.mean()) + self.v3
 
         self.assertTrue(np.allclose(y.npvalue(), y_np_value))
+
+
+class TestSlicing(unittest.TestCase):
+
+    def test_slicing(self):
+        dy.renew_cg()
+        data = np.random.random((10,10,10))
+        self.assertTrue(np.allclose(dy.inputTensor(data)[:1,:2,:3].npvalue(), data[:1,:2,:3]))
+        self.assertTrue(np.allclose(dy.inputTensor(data, batched=True)[:1,:2,:3].npvalue(), data[:1,:2,:3]))
+        self.assertTrue(np.allclose(dy.inputTensor(data)[:,:,:3].npvalue(), data[:,:,:3]))
+        self.assertTrue(np.allclose(dy.inputTensor(data)[3:,:,:].npvalue(), data[3:,:,:]))
+        self.assertTrue(np.allclose(dy.inputTensor(data)[:,:,::1].npvalue(), data[:,:,::1]))
+        self.assertTrue(np.allclose(dy.inputTensor(data)[:,:,::3].npvalue(), data[:,:,::3]))
+        self.assertTrue(np.allclose(dy.inputTensor(data)[3:5,1:3,1:].npvalue(), data[3:5,1:3,1:]))
 
 
 class TestSimpleRNN(unittest.TestCase):
@@ -514,6 +614,7 @@ class TestClassFactoredSoftmax(unittest.TestCase):
             nll_const = self.sm.neg_log_softmax(dy.inputTensor(np.arange(3)), 7, update=False)
             nll.value()
             nll_const.value()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <string>
+#include <unsupported/Eigen/CXX11/Tensor>
 
 #include "dynet/cuda.h"
 #include "dynet/dynet.h"
@@ -87,11 +88,13 @@ void Device::allocate_tensor(DeviceMempool mp, Tensor & tens) {
 }
 
 #if HAVE_CUDA
-Device_GPU::Device_GPU(int my_id, const DeviceMempoolSizes & mbs, int device_id) :
+Device_GPU::Device_GPU(int my_id, const DeviceMempoolSizes & mbs,
+                       int device_id, unsigned seed) :
   Device(my_id, DeviceType::GPU, &gpu_mem), cuda_device_id(device_id), gpu_mem(device_id) {
   CUDA_CHECK(cudaSetDevice(device_id));
   CUBLAS_CHECK(cublasCreate(&cublas_handle));
   CUBLAS_CHECK(cublasSetPointerMode(cublas_handle, CUBLAS_POINTER_MODE_DEVICE));
+  reset_rng(seed);
 #if HAVE_CUDNN
   CUDNN_CHECK(cudnnCreate(&cudnnHandle));
 #endif
@@ -107,9 +110,7 @@ Device_GPU::Device_GPU(int my_id, const DeviceMempoolSizes & mbs, int device_id)
   CUDA_CHECK(cudaMemcpyAsync(kSCALAR_ZERO, &zero, sizeof(float), cudaMemcpyHostToDevice));
 
   // Initialize the Eigen device
-  CUDA_CHECK(cudaStreamCreate(&stream));
-  estream = new EigenCudaStreamDevice(device_id);
-  estream->set_stream(&stream);
+  estream = new Eigen::CudaStreamDevice(device_id);
   edevice = new Eigen::GpuDevice(estream);
 
   // this is the big memory allocation.
@@ -120,6 +121,13 @@ Device_GPU::Device_GPU(int my_id, const DeviceMempoolSizes & mbs, int device_id)
 }
 
 Device_GPU::~Device_GPU() {}
+
+void Device_GPU::reset_rng(unsigned seed) {
+  CURAND_CHECK(curandCreateGenerator(&curandeng,
+                                     CURAND_RNG_PSEUDO_PHILOX4_32_10));
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(curandeng,
+                                                  seed + 1));
+}
 #endif
 
 Device_CPU::Device_CPU(int my_id, const DeviceMempoolSizes & mbs, bool shared) :
